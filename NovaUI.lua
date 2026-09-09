@@ -35,7 +35,7 @@
       clipped by a collapsed section or a scrolling page
 ]]
 local Nova = {}
-Nova.Version = "0.3.0"
+Nova.Version = "0.3.1"
 Nova.Flags = {}      -- live values, keyed by Flag (or auto Name)
 Nova._setters = {}   -- Flag -> function(value) applied on config load
 Nova._paint = {}     -- { o = Instance, k = kind, t = token } repainted by SetTheme
@@ -305,37 +305,55 @@ local function Ripple(btn, token)
     task.delay(0.55, function() c:Destroy() end)
   end)
 end
--- Frame drag without the classic "jump": on grab we freeze the window's current
--- screen rect (anchor -> 0,0) and measure the grab delta with inp.Position,
--- which lives in the same space as AbsolutePosition (GetMouseLocation does
--- not — it carries the topbar inset, hence the Y teleport). All math is in
--- layout units (divided by UIScale) so win:SetScale never breaks dragging.
+-- Window drag with zero grab-shift by construction. On grab we only remember
+-- two things: the pointer (inp.Position) and the current Position. While the
+-- pointer moves we apply ONLY its delta to that stored Position.
+-- Pointer space and layout space are never subtracted from each other, so the
+-- top-bar inset, the frame anchor and UIScale cannot shift the grab point:
+-- at the grab instant the delta is 0, therefore Position is untouched and the
+-- window physically cannot teleport. Delta is divided by the window zoom so
+-- movement stays 1:1 at any UI scale.
 local function Drag(frame, handle, zoom, onStart, onEnd)
-  local dragging, dx, dy = false, 0, 0
-  local c1 = handle.InputBegan:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
-      dragging = true
-      local z = zoom()
-      frame.AnchorPoint = Vector2.new(0, 0)
-      frame.Position = UDim2.fromOffset(frame.AbsolutePosition.X / z, frame.AbsolutePosition.Y / z)
-      dx = (inp.Position.X - frame.AbsolutePosition.X) / z
-      dy = (inp.Position.Y - frame.AbsolutePosition.Y) / z
-      if onStart then onStart() end
+  local active, tObj = false, nil
+  local sx, sy, ox, oy = 0, 0, 0, 0
+  local function z()
+    if type(zoom) == "function" then
+      local v = zoom()
+      if type(v) == "number" and v > 0 then return v end
     end
+    return 1
+  end
+  local c1 = handle.InputBegan:Connect(function(inp)
+    local t = inp.UserInputType
+    if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+    if active then return end
+    active, tObj = true, (t == Enum.UserInputType.Touch) and inp or nil
+    sx, sy = inp.Position.X, inp.Position.Y
+    local p = frame.Position
+    ox, oy = p.X.Offset, p.Y.Offset
+    if onStart then onStart() end
   end)
   local c2 = UserInputService.InputChanged:Connect(function(inp)
-    if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
-      local z = zoom()
-      local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
-      local w, h = frame.AbsoluteSize.X / z, frame.AbsoluteSize.Y / z
-      frame.Position = UDim2.fromOffset(
-        clamp(inp.Position.X / z - dx, -w + 90, vp.X / z - 90),
-        clamp(inp.Position.Y / z - dy, 0, vp.Y / z - 44))
-    end
+    if not active then return end
+    local t = inp.UserInputType
+    local isMove = (t == Enum.UserInputType.MouseMovement and tObj == nil)
+      or (t == Enum.UserInputType.Touch and inp == tObj)
+    if not isMove then return end
+    local s = z()
+    local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+    local w, h = frame.AbsoluteSize.X / s, frame.AbsoluteSize.Y / s
+    local p = frame.Position
+    frame.Position = UDim2.new(p.X.Scale,
+      clamp(ox + (inp.Position.X - sx) / s, -w + 90, vp.X / s - 90),
+      p.Y.Scale,
+      clamp(oy + (inp.Position.Y - sy) / s, 0, vp.Y / s - 44))
   end)
   local c3 = UserInputService.InputEnded:Connect(function(inp)
-    if dragging and (inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch) then
-      dragging = false
+    if not active then return end
+    local t = inp.UserInputType
+    if (t == Enum.UserInputType.MouseButton1 and tObj == nil)
+      or (t == Enum.UserInputType.Touch and inp == tObj) then
+      active, tObj = false, nil
       if onEnd then onEnd() end
     end
   end)
@@ -1789,4 +1807,5 @@ function Nova:UnloadAll()
   _notifHolder = nil
 end
 
+print("[NovaUI] v" .. Nova.Version .. " loaded (delta-drag)")
 return Nova
