@@ -1,5 +1,5 @@
 --[[
-  NovaUI v0.1.0 — single-file UI framework for Roblox cheat scripts.
+  NovaUI v0.2.0 — single-file UI framework for Roblox cheat scripts.
   Zero dependencies, executor-friendly, loadstring-ready.
 
   GitHub usage (pin a version tag, not main):
@@ -23,7 +23,7 @@
   Theming: Nova:SetTheme("Dark" | "Midnight" | "Light" | customTable).
 ]]
 local Nova = {}
-Nova.Version = "0.1.0"
+Nova.Version = "0.2.0"
 Nova.Flags = {}      -- live values, keyed by Flag (or auto Name)
 Nova._setters = {}   -- Flag -> function(value) applied on config load
 Nova._paint = {}     -- { o = Instance, role = string } repainted by SetTheme
@@ -136,28 +136,44 @@ local function Ripple(btn)
     task.delay(0.5, function() c:Destroy() end)
   end)
 end
-local function Drag(frame, handle)
+-- Frame drag without the classic "jump": on grab we freeze the window's current
+-- screen rect (anchor -> 0,0) and measure the grab delta with inp.Position,
+-- which lives in the same space as AbsolutePosition (GetMouseLocation does
+-- not — it carries the topbar inset, hence the Y teleport). All math is in
+-- layout units (divided by UIScale) so win:SetScale never breaks dragging.
+-- Returns connections so the window can disconnect them on Unload.
+local function Drag(frame, handle, scaleObj)
   local dragging, dx, dy = false, 0, 0
-  handle.InputBegan:Connect(function(inp)
+  local function zoom()
+    if scaleObj and scaleObj.Parent then return scaleObj.Scale end
+    return 1
+  end
+  local c1 = handle.InputBegan:Connect(function(inp)
     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
       dragging = true
-      local mp = UserInputService:GetMouseLocation()
-      dx, dy = mp.X - frame.AbsolutePosition.X, mp.Y - frame.AbsolutePosition.Y
+      local z = zoom()
+      frame.AnchorPoint = Vector2.new(0, 0)
+      frame.Position = UDim2.fromOffset(frame.AbsolutePosition.X / z, frame.AbsolutePosition.Y / z)
+      dx = (inp.Position.X - frame.AbsolutePosition.X) / z
+      dy = (inp.Position.Y - frame.AbsolutePosition.Y) / z
     end
   end)
-  UserInputService.InputChanged:Connect(function(inp)
+  local c2 = UserInputService.InputChanged:Connect(function(inp)
     if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
-      local mp = UserInputService:GetMouseLocation()
+      local z = zoom()
       local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
-      local w, h = frame.AbsoluteSize.X, frame.AbsoluteSize.Y
-      frame.Position = UDim2.fromOffset(clamp(mp.X - dx, -w + 80, vp.X - 80), clamp(mp.Y - dy, 0, vp.Y - 40))
+      local w, h = frame.AbsoluteSize.X / z, frame.AbsoluteSize.Y / z
+      frame.Position = UDim2.fromOffset(
+        clamp(inp.Position.X / z - dx, -w + 80, vp.X / z - 80),
+        clamp(inp.Position.Y / z - dy, 0, vp.Y / z - 40))
     end
   end)
-  UserInputService.InputEnded:Connect(function(inp)
+  local c3 = UserInputService.InputEnded:Connect(function(inp)
     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
       dragging = false
     end
   end)
+  return { c1, c2, c3 }
 end
 -- role -> property repaint on theme change. roles: bg,bg2,row,hover,accent,
 -- accent2,text,dim,good,warn,danger,grad(grad=ColorSequence accent->accent2)
@@ -351,7 +367,7 @@ local function addToggle(parent, opt)
     AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
     Size = UDim2.fromOffset(44, 24),
   }, row)
-  Corner(sw, 12); Stroke(sw, T.Dim, 1, 0.6)
+  Corner(sw, 12); local swStroke = Stroke(sw, T.Dim, 1, 0.6)
   local knob = New("Frame", {
     BackgroundColor3 = T.Dim, BorderSizePixel = 0,
     Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(3, 3),
@@ -361,6 +377,7 @@ local function addToggle(parent, opt)
   function h.Set(v, silent)
     val = v == true
     Tween(sw, { BackgroundColor3 = val and T.Accent or T.Bg }, 0.18)
+    Tween(swStroke, { Color = val and T.Accent or T.Dim, Transparency = val and 0.15 or 0.6 }, 0.18)
     Tween(knob, {
       Position = val and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3),
       BackgroundColor3 = val and Color3.fromRGB(255, 255, 255) or T.Dim,
@@ -384,8 +401,14 @@ local function addSlider(parent, opt)
   }, parent)
   local tt = Txt(wrap, opt.Name or "Slider", 13, "text", Enum.Font.GothamMedium)
   tt.Size = UDim2.new(1, -80, 0, 18)
-  local vv = Txt(wrap, "", 13, "dim", Enum.Font.GothamBold, Enum.TextXAlignment.Right)
-  vv.Size = UDim2.new(1, 0, 0, 18)
+  local pill = New("Frame", {
+    BackgroundColor3 = T.Row, BorderSizePixel = 0,
+    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+    Size = UDim2.new(0, 68, 0, 20),
+  }, wrap)
+  Paint(pill, "row"); Corner(pill, 10)
+  local vv = Txt(pill, "", 12, "text", Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+  vv.Size = UDim2.fromScale(1, 1)
   local track = New("TextButton", {
     Text = "", AutoButtonColor = false, BorderSizePixel = 0,
     BackgroundColor3 = T.Bg, Size = UDim2.new(1, -4, 0, 8),
@@ -400,10 +423,10 @@ local function addSlider(parent, opt)
   New("UIGradient", { Color = ColorSequence.new(T.Accent, T.Accent2), Rotation = 0 }, fill)
   local knob = New("Frame", {
     BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0,
-    AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(14, 14),
+    AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(16, 16),
     Position = UDim2.fromScale(0, 0.5),
   }, track)
-  Corner(knob, 7)
+  Corner(knob, 8)
   Stroke(knob, T.Accent, 2, 0)
   local hit = New("TextButton", {
     Text = "", BackgroundTransparency = 1, BorderSizePixel = 0,
@@ -469,14 +492,16 @@ local function addDropdown(parent, opt, win)
   }, wrap)
   Corner(list, 10); Stroke(list, T.Accent, 1, 0.7); Pad(list, 4, 4, 4, 4)
   local ll = List(list, 2); ll.HorizontalAlignment = Enum.HorizontalAlignment.Left
+  local optBtns = {}
   for _, name in ipairs(options) do
     local ob = New("TextButton", {
-      Text = "  " .. tostring(name), Font = Enum.Font.GothamMedium, TextSize = 12,
+      Text = "     " .. tostring(name), Font = Enum.Font.GothamMedium, TextSize = 12,
       TextColor3 = T.Text, TextXAlignment = Enum.TextXAlignment.Left,
       BackgroundColor3 = T.Bg, BorderSizePixel = 0, AutoButtonColor = false,
       Size = UDim2.new(1, 0, 0, rowH),
     }, list)
     Corner(ob, 6)
+    optBtns[tostring(name)] = ob
     ob.MouseEnter:Connect(function() ob.BackgroundColor3 = T.Hover end)
     ob.MouseLeave:Connect(function() ob.BackgroundColor3 = T.Bg end)
     ob.MouseButton1Click:Connect(function() h.Set(name) ; h.Close() end)
@@ -484,6 +509,10 @@ local function addDropdown(parent, opt, win)
   local open = false
   function h.Set(v, silent)
     val = v; cur.Text = tostring(v)
+    for n, b in pairs(optBtns) do
+      local on = tostring(v) == n
+      b.Text = (on and "✓  " or "     ") .. n
+    end
     if not silent then fire({ Flag = flag, Callback = opt.Callback }, val) end
   end
   function h.Get() return val end
@@ -520,6 +549,7 @@ local function addKeybind(parent, opt)
     Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(100, 30),
   }, wrap)
   Paint(box, "row"); Corner(box, 8)
+  Stroke(box, T.Dim, 1, 0.6)
   local h = { _press = nil }
   function h.Set(v, silent)
     val = v
@@ -594,6 +624,25 @@ local function addColor(parent, opt)
   sr = addSlider(pop, { Name = "R", Min = 0, Max = 255, Default = math.floor(val.R * 255 + 0.5), Callback = pull })
   sg2 = addSlider(pop, { Name = "G", Min = 0, Max = 255, Default = math.floor(val.G * 255 + 0.5), Callback = pull })
   sb = addSlider(pop, { Name = "B", Min = 0, Max = 255, Default = math.floor(val.B * 255 + 0.5), Callback = pull })
+  -- quick presets: one click, no slider fiddling
+  local presets = {
+    Color3.fromRGB(124, 92, 255), Color3.fromRGB(56, 208, 255),
+    Color3.fromRGB(80, 220, 140), Color3.fromRGB(255, 190, 90),
+    Color3.fromRGB(255, 110, 130), Color3.fromRGB(240, 240, 245),
+  }
+  local prow = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 24) }, pop)
+  local pl = List(prow, 6, Enum.FillDirection.Horizontal)
+  pl.HorizontalAlignment = Enum.HorizontalAlignment.Left
+  for _, c in ipairs(presets) do
+    local pb = New("TextButton", {
+      Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+      BackgroundColor3 = c, Size = UDim2.fromOffset(24, 24),
+    }, prow)
+    Corner(pb, 12); Stroke(pb, T.Dim, 1, 0.5)
+    pb.MouseEnter:Connect(function() Tween(pb, { Size = UDim2.fromOffset(28, 28) }, 0.12) end)
+    pb.MouseLeave:Connect(function() Tween(pb, { Size = UDim2.fromOffset(24, 24) }, 0.12) end)
+    pb.MouseButton1Click:Connect(function() h.Set(c) end)
+  end
   sw.MouseButton1Click:Connect(function() pop.Visible = not pop.Visible end)
   regSetter(flag, function(v)
     if type(v) == "userdata" then h.Set(v, false) end
@@ -643,7 +692,7 @@ function Nova:Window(opts)
   }
   local cont = New("Frame", {
     BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromScale(0.5, 0.5), Size = opts.Size or UDim2.fromOffset(620, 440),
+    Position = UDim2.fromScale(0.5, 0.5), Size = opts.Size or UDim2.fromOffset(640, 452),
   }, sg)
   local scale = New("UIScale", { Scale = 1 }, cont)
   local shell = New("CanvasGroup", {
@@ -651,6 +700,7 @@ function Nova:Window(opts)
     GroupTransparency = 0,
   }, cont)
   Paint(shell, "bg"); Corner(shell, 14); Stroke(shell, T.Accent, 1.4, 0.35)
+  local shellPop = New("UIScale", { Scale = 1 }, shell)
   -- shadow
   local sh = New("ImageLabel", {
     BackgroundTransparency = 1, Image = "rbxassetid://5028857084",
@@ -671,15 +721,34 @@ function Nova:Window(opts)
     Size = UDim2.new(1, 0, 0, 14), Position = UDim2.new(0, 0, 1, -14),
   }, head)
   Paint(headFix, "bg2"); headFix.ZIndex = 0
+  local logo = New("Frame", {
+    BackgroundColor3 = T.Accent, BorderSizePixel = 0,
+    Size = UDim2.fromOffset(34, 34), Position = UDim2.fromOffset(14, 11),
+  }, head)
+  Corner(logo, 10)
+  New("UIGradient", { Color = ColorSequence.new(T.Accent, T.Accent2), Rotation = 35 }, logo)
+  local logoGlow = New("ImageLabel", {
+    BackgroundTransparency = 1, Image = "rbxassetid://5028857084",
+    ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(24, 24, 148, 148),
+    ImageColor3 = T.Accent, ImageTransparency = 0.78,
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.new(1, 16, 1, 16), ZIndex = 0,
+  }, logo)
+  local logoT = New("TextLabel", {
+    Text = string.sub(tostring(opts.Title or "N"), 1, 1),
+    Font = Enum.Font.GothamBlack, TextSize = 19,
+    TextColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 1,
+    Size = UDim2.fromScale(1, 1),
+  }, logo)
   local title = New("TextLabel", {
     Text = opts.Title or "NOVA", Font = Enum.Font.GothamBold, TextSize = 18,
     TextColor3 = T.Text, TextXAlignment = Enum.TextXAlignment.Left,
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(18, 8),
-    Size = UDim2.new(1, -140, 0, 24),
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(58, 8),
+    Size = UDim2.new(1, -180, 0, 24),
   }, head)
   New("UIGradient", { Color = ColorSequence.new(T.Accent, T.Accent2), Rotation = 15 }, title)
   local sub = Txt(head, opts.Subtitle or ("NovaUI " .. Nova.Version), 11, "dim")
-  sub.Position, sub.Size = UDim2.fromOffset(18, 32), UDim2.new(1, -140, 0, 14)
+  sub.Position, sub.Size = UDim2.fromOffset(58, 32), UDim2.new(1, -180, 0, 14)
   local function headBtn(txt, x, danger)
     local b = New("TextButton", {
       Text = txt, Font = Enum.Font.GothamBold, TextSize = 16,
@@ -705,20 +774,25 @@ function Nova:Window(opts)
     Position = UDim2.new(0, 0, 0, 58),
   }, shell)
   local side = New("Frame", {
-    BackgroundTransparency = 1, Size = UDim2.new(0, 150, 1, 0),
+    BackgroundTransparency = 1, Size = UDim2.new(0, 162, 1, 0),
   }, body)
   Pad(side, 12, 6, 4, 0)
-  local sideList = List(side, 4); sideList.HorizontalAlignment = Enum.HorizontalAlignment.Left
+  local sideList = List(side, 6); sideList.HorizontalAlignment = Enum.HorizontalAlignment.Left
   local pageWrap = New("Frame", {
-    BackgroundTransparency = 1, Size = UDim2.new(1, -162, 1, 0),
-    Position = UDim2.new(0, 158, 0, 0),
+    BackgroundTransparency = 1, Size = UDim2.new(1, -174, 1, 0),
+    Position = UDim2.new(0, 170, 0, 0),
   }, body)
-  -- footer
+  -- footer: status dot + hint
+  local dot = New("Frame", {
+    BackgroundColor3 = T.Good, BorderSizePixel = 0,
+    Size = UDim2.fromOffset(7, 7), Position = UDim2.new(0, 18, 1, -17),
+  }, shell)
+  Corner(dot, 4)
   local foot = Txt(shell, (opts.Footer or "RightShift — hide  •  NovaUI ") .. Nova.Version,
-    10, "dim", Enum.Font.Gotham, Enum.TextXAlignment.Center)
-  foot.AnchorPoint = Vector2.new(0, 1); foot.Position = UDim2.new(0, 0, 1, -6)
-  foot.Size = UDim2.new(1, 0, 0, 16)
-  Drag(cont, head)
+    10, "dim", Enum.Font.Gotham, Enum.TextXAlignment.Left)
+  foot.Position = UDim2.new(0, 32, 1, -24)
+  foot.Size = UDim2.new(1, -48, 0, 16)
+  for _, c in ipairs(Drag(cont, head, scale)) do table.insert(win._conns, c) end
   -- visibility -----------------------------------------------------------
   local visible = true
   function win:SetVisible(v)
@@ -727,8 +801,11 @@ function Nova:Window(opts)
     visible = v
     if v then
       cont.Visible = true
+      shellPop.Scale = 0.96
+      Tween(shellPop, { Scale = 1 }, 0.22, "Back")
       Tween(shell, { GroupTransparency = 0 }, 0.18)
     else
+      Tween(shellPop, { Scale = 0.97 }, 0.12)
       local tw = Tween(shell, { GroupTransparency = 1 }, 0.15)
       tw.Completed:Connect(function() if not visible then cont.Visible = false end end)
     end
@@ -769,29 +846,48 @@ function Nova:Window(opts)
     List(page, 10)
     local tb = New("TextButton", {
       Text = "", AutoButtonColor = false, BorderSizePixel = 0,
-      BackgroundColor3 = T.Bg2, Size = UDim2.new(1, 0, 0, 36),
+      BackgroundColor3 = T.Bg2, Size = UDim2.new(1, 0, 0, 42),
     }, side)
     Paint(tb, "bg2"); Corner(tb, 10); Pad(tb, 10, 0, 6, 0)
     local ind = New("Frame", {
       BackgroundColor3 = T.Accent, BorderSizePixel = 0,
-      Size = UDim2.new(0, 3, 0, 20), Position = UDim2.new(0, 6, 0.5, 0),
+      Size = UDim2.new(0, 3, 0, 22), Position = UDim2.new(0, 6, 0.5, 0),
       AnchorPoint = Vector2.new(0, 0.5), Visible = false,
     }, tb)
     Corner(ind, 2)
-    local ic = Txt(tb, topt.Icon or "•", 14, "dim", Enum.Font.GothamBold)
-    ic.Size, ic.Position = UDim2.new(0, 24, 1, 0), UDim2.new(0, 10, 0, 0)
-    ic.TextXAlignment = Enum.TextXAlignment.Center
-    local nm = Txt(tb, topt.Name or "Tab", 13, "text", Enum.Font.GothamMedium)
-    nm.Size, nm.Position = UDim2.new(1, -40, 1, 0), UDim2.new(0, 36, 0, 0)
-    local tab = { _page = page, _btn = tb, _ind = ind, _defaultSec = nil }
+    -- icon chip: 30px tile, glyph lights up + tile fills accent when active
+    local chip = New("Frame", {
+      BackgroundColor3 = T.Row, BorderSizePixel = 0,
+      Size = UDim2.fromOffset(30, 30), Position = UDim2.new(0, 11, 0.5, 0),
+      AnchorPoint = Vector2.new(0, 0.5),
+    }, tb)
+    Paint(chip, "row"); Corner(chip, 9)
+    local ic = New("TextLabel", {
+      Text = topt.Icon or "•", Font = Enum.Font.GothamBold, TextSize = 17,
+      TextColor3 = T.Dim, BackgroundTransparency = 1,
+      Size = UDim2.fromScale(1, 1),
+    }, chip)
+    Paint(ic, "dim")
+    local nm = Txt(tb, topt.Name or "Tab", 14, "text", Enum.Font.GothamMedium)
+    nm.Size, nm.Position = UDim2.new(1, -54, 1, 0), UDim2.new(0, 47, 0, 0)
+    local tab = { _page = page, _btn = tb, _ind = ind, _chip = chip, _icon = ic, _active = false, _defaultSec = nil }
     function tab.Select()
       for _, t in ipairs(win._tabs) do
         local on = t == tab
+        t._active = on
         t._page.Visible = on
         t._ind.Visible = on
         Tween(t._btn, { BackgroundColor3 = on and T.Row or T.Bg2 }, 0.15)
+        Tween(t._chip, { BackgroundColor3 = on and T.Accent or T.Row }, 0.15)
+        Tween(t._icon, { TextColor3 = on and Color3.fromRGB(255, 255, 255) or T.Dim }, 0.15)
       end
     end
+    tb.MouseEnter:Connect(function()
+      if not tab._active then Tween(tb, { BackgroundColor3 = T.Hover }, 0.12) end
+    end)
+    tb.MouseLeave:Connect(function()
+      if not tab._active then Tween(tb, { BackgroundColor3 = T.Bg2 }, 0.12) end
+    end)
     tb.MouseButton1Click:Connect(function() tab.Select() end)
     table.insert(win._tabs, tab)
     if #win._tabs == 1 then tab.Select() end
@@ -808,8 +904,14 @@ function Nova:Window(opts)
         Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, 26),
       }, box)
+      local tick = New("Frame", {
+        BackgroundColor3 = T.Accent, BorderSizePixel = 0,
+        Size = UDim2.new(0, 3, 0, 14), Position = UDim2.new(0, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(0, 0.5),
+      }, hb)
+      Corner(tick, 2)
       local st = Txt(hb, string.upper(sopt.Name or "SECTION"), 12, "dim", Enum.Font.GothamBold)
-      st.Size = UDim2.new(1, -30, 1, 0)
+      st.Size = UDim2.new(1, -30, 1, 0); st.Position = UDim2.new(0, 11, 0, 0)
       local ar = Txt(hb, "▾", 14, "dim", Enum.Font.GothamBold, Enum.TextXAlignment.Right)
       ar.Size = UDim2.new(1, 0, 1, 0)
       local inner = New("Frame", { BackgroundTransparency = 1,
@@ -851,6 +953,11 @@ function Nova:Window(opts)
     return tab
   end
   table.insert(Nova._wins, win)
+  -- intro pop on creation
+  shellPop.Scale = 0.95
+  shell.GroupTransparency = 1
+  Tween(shellPop, { Scale = 1 }, 0.3, "Back")
+  Tween(shell, { GroupTransparency = 0 }, 0.22)
   return win
 end
 
