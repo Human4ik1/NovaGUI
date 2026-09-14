@@ -305,17 +305,19 @@ local function Ripple(btn, token)
     task.delay(0.55, function() c:Destroy() end)
   end)
 end
--- Window drag with zero grab-shift by construction. On grab we only remember
--- two things: the pointer (inp.Position) and the current Position. While the
--- pointer moves we apply ONLY its delta to that stored Position.
--- Pointer space and layout space are never subtracted from each other, so the
--- top-bar inset, the frame anchor and UIScale cannot shift the grab point:
--- at the grab instant the delta is 0, therefore Position is untouched and the
--- window physically cannot teleport. Delta is divided by the window zoom so
+-- Window drag with zero grab-shift by construction. On grab we snapshot the
+-- frame's own Position components (scale + offset) and the pointer. While the
+-- pointer moves we apply ONLY its delta to that snapshot and write it back
+-- with the SAME scale components — at grab instant the delta is 0, so the
+-- rewritten Position is bit-identical to the old one: teleport is impossible.
+-- We deliberately never read AbsolutePosition here: it disagrees with the
+-- Position math by the topbar inset under IgnoreGuiInset, which used to kick
+-- the window on the first move. Delta is divided by the window zoom so
 -- movement stays 1:1 at any UI scale.
 local function Drag(frame, handle, zoom, onStart, onEnd)
   local active, tObj = false, nil
-  local sx, sy, gx, gy = 0, 0, 0, 0
+  local sx, sy = 0, 0
+  local gsx, gsy, gox, goy, gax, gay = 0.5, 0.5, 0, 0, 0, 0
   local function z()
     if type(zoom) == "function" then
       local v = zoom()
@@ -329,11 +331,9 @@ local function Drag(frame, handle, zoom, onStart, onEnd)
     if active then return end
     active, tObj = true, (t == Enum.UserInputType.Touch) and inp or nil
     sx, sy = inp.Position.X, inp.Position.Y
-    -- absolute grab point in layout units (scale-independent): the window may
-    -- be scale-anchored (e.g. 0.5/0.5 centered), so raw offsets are useless.
-    -- At grab instant delta is 0, therefore Position is untouched: no teleport.
-    local s0 = z()
-    gx, gy = frame.AbsolutePosition.X / s0, frame.AbsolutePosition.Y / s0
+    local gp = frame.Position
+    gsx, gsy, gox, goy = gp.X.Scale, gp.Y.Scale, gp.X.Offset, gp.Y.Offset
+    gax, gay = frame.AnchorPoint.X, frame.AnchorPoint.Y
     if onStart then onStart() end
   end)
   local c2 = UserInputService.InputChanged:Connect(function(inp)
@@ -346,13 +346,16 @@ local function Drag(frame, handle, zoom, onStart, onEnd)
     local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
     local vw, vh = vp.X / s, vp.Y / s
     local w, h = frame.AbsoluteSize.X / s, frame.AbsoluteSize.Y / s
-    -- clamp the absolute top-left corner: window can travel anywhere while
-    -- keeping a 90px horizontal / 44px top grab strip on screen
-    local nx = clamp(gx + (inp.Position.X - sx) / s, -w + 90, vw - 90)
-    local ny = clamp(gy + (inp.Position.Y - sy) / s, 0, vh - 44)
-    local p = frame.Position
-    frame.Position = UDim2.new(p.X.Scale, nx - p.X.Scale * vw,
-      p.Y.Scale, ny - p.Y.Scale * vh)
+    -- absolute grab corner in layout units, derived from the snapshotted
+    -- Position AND AnchorPoint (never from AbsolutePosition, see above)
+    local baseX = gsx * vw + gox - gax * w
+    local baseY = gsy * vh + goy - gay * h
+    -- clamp the corner: window travels anywhere while keeping a 90px
+    -- horizontal / 44px top grab strip on screen
+    local nx = clamp(baseX + (inp.Position.X - sx) / s, -w + 90, vw - 90)
+    local ny = clamp(baseY + (inp.Position.Y - sy) / s, 0, vh - 44)
+    frame.Position = UDim2.new(gsx, nx + gax * w - gsx * vw,
+      gsy, ny + gay * h - gsy * vh)
   end)
   local c3 = UserInputService.InputEnded:Connect(function(inp)
     if not active then return end
