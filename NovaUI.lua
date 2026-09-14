@@ -315,7 +315,7 @@ end
 -- movement stays 1:1 at any UI scale.
 local function Drag(frame, handle, zoom, onStart, onEnd)
   local active, tObj = false, nil
-  local sx, sy, ox, oy = 0, 0, 0, 0
+  local sx, sy, gx, gy = 0, 0, 0, 0
   local function z()
     if type(zoom) == "function" then
       local v = zoom()
@@ -329,8 +329,11 @@ local function Drag(frame, handle, zoom, onStart, onEnd)
     if active then return end
     active, tObj = true, (t == Enum.UserInputType.Touch) and inp or nil
     sx, sy = inp.Position.X, inp.Position.Y
-    local p = frame.Position
-    ox, oy = p.X.Offset, p.Y.Offset
+    -- absolute grab point in layout units (scale-independent): the window may
+    -- be scale-anchored (e.g. 0.5/0.5 centered), so raw offsets are useless.
+    -- At grab instant delta is 0, therefore Position is untouched: no teleport.
+    local s0 = z()
+    gx, gy = frame.AbsolutePosition.X / s0, frame.AbsolutePosition.Y / s0
     if onStart then onStart() end
   end)
   local c2 = UserInputService.InputChanged:Connect(function(inp)
@@ -341,12 +344,15 @@ local function Drag(frame, handle, zoom, onStart, onEnd)
     if not isMove then return end
     local s = z()
     local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+    local vw, vh = vp.X / s, vp.Y / s
     local w, h = frame.AbsoluteSize.X / s, frame.AbsoluteSize.Y / s
+    -- clamp the absolute top-left corner: window can travel anywhere while
+    -- keeping a 90px horizontal / 44px top grab strip on screen
+    local nx = clamp(gx + (inp.Position.X - sx) / s, -w + 90, vw - 90)
+    local ny = clamp(gy + (inp.Position.Y - sy) / s, 0, vh - 44)
     local p = frame.Position
-    frame.Position = UDim2.new(p.X.Scale,
-      clamp(ox + (inp.Position.X - sx) / s, -w + 90, vp.X / s - 90),
-      p.Y.Scale,
-      clamp(oy + (inp.Position.Y - sy) / s, 0, vp.Y / s - 44))
+    frame.Position = UDim2.new(p.X.Scale, nx - p.X.Scale * vw,
+      p.Y.Scale, ny - p.Y.Scale * vh)
   end)
   local c3 = UserInputService.InputEnded:Connect(function(inp)
     if not active then return end
@@ -1006,7 +1012,7 @@ local function addKeybind(parent, opt, ctx)
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
-  function h.OnPress(fn) h._press = fn return h end
+  function h:OnPress(fn) h._press = fn return h end
 
   local listening = false
   box.MouseButton1Click:Connect(function()
