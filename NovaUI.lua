@@ -1476,6 +1476,17 @@ function Nova:Window(opts)
   function win:Notify(n) return Nova:Notify(n) end
 
   local tkey = opts.Keybind == nil and Enum.KeyCode.RightShift or opts.Keybind
+  -- rebindable at runtime: win:SetToggleKey(Enum.KeyCode.Insert).
+  -- Clearing (nil) disables the hotkey; the ▲/— buttons still work.
+  function win:SetToggleKey(k)
+    if k ~= nil then
+      local ok = pcall(function() return k.EnumType == Enum.KeyCode end)
+      if not ok then return false end
+    end
+    tkey = k
+    return true
+  end
+  function win:GetToggleKey() return tkey end
   if tkey then
     ctx.bind(UserInputService.InputBegan:Connect(function(inp, gpe)
       if not gpe and inp.KeyCode == tkey and UserInputService:GetFocusedTextBox() == nil then
@@ -1580,6 +1591,46 @@ function Nova:Window(opts)
 
     local tab = { _page = page, _host = pageHost, _btn = tb, _icon = ic, _name = nm,
       _active = false, _defaultSec = nil, Name = topt.Name or "Tab" }
+
+    -- optional inline switch on the tab button: win:Tab({ Toggle = {
+    --   Default = true, Tooltip = "...", Callback = fn } }). Clicking the
+    -- switch flips it WITHOUT selecting the tab (it sits above the row).
+    local togOpt = topt.Toggle
+    if type(togOpt) == "table" then
+      local tst = togOpt.Default ~= false
+      local sw = New("TextButton", {
+        Text = "", AutoButtonColor = false, BorderSizePixel = 0,
+        BackgroundColor3 = T[tst and "Accent" or "Line"],
+        AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+        Size = UDim2.fromOffset(30, 18), ZIndex = 5,
+      }, tb)
+      Corner(sw, 9)
+      local knob = New("Frame", {
+        BackgroundColor3 = T[tst and "OnAccent" or "Sub"], BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, tst and 13 or 3, 0.5, 0),
+        Size = UDim2.fromOffset(12, 12), ZIndex = 6,
+      }, sw)
+      Corner(knob, 6)
+      local function paintSw()
+        local Tn = Nova.Theme
+        sw.BackgroundColor3 = Tn[tst and "Accent" or "Line"]
+        knob.BackgroundColor3 = Tn[tst and "OnAccent" or "Sub"]
+        knob.Position = UDim2.new(0, tst and 13 or 3, 0.5, 0)
+      end
+      function tab:SetToggle(v, silent)
+        tst = v == true
+        paintSw()
+        if not silent and type(togOpt.Callback) == "function" then
+          local ok, err = pcall(togOpt.Callback, tst)
+          if not ok then warn("[NovaUI] tab toggle: " .. tostring(err)) end
+        end
+      end
+      function tab:GetToggle() return tst end
+      sw.MouseButton1Click:Connect(function() tab:SetToggle(not tst) end)
+      if ctx then ctx.tip(sw, togOpt.Tooltip) end
+      tab._toggle = sw
+    end
 
     function tab.Select()
       if tab._active then return end
