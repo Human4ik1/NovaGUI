@@ -1020,7 +1020,13 @@ return function(api)
     getgenv().__HUMA_DELTA_DBG = function()
       local ok, snap = pcall(function()
         local rigs, labels = 0, 0
-        for _ in pairs(pesc) do rigs = rigs + 1 end
+        local visBox, visName, visTrace = 0, 0, 0
+        for _, e in pairs(pesc) do
+          rigs = rigs + 1
+          pcall(function() if e.box.Visible then visBox = visBox + 1 end end)
+          pcall(function() if e.name.Visible then visName = visName + 1 end end)
+          pcall(function() if e.trace.Visible then visTrace = visTrace + 1 end end)
+        end
         for _, mp in ipairs({ lootMap, corpseMap, npcMap, exitMap }) do
           for _ in pairs(mp) do labels = labels + 1 end
         end
@@ -1028,6 +1034,7 @@ return function(api)
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
           objs = { rigs = rigs, labels = labels },
+          shown = { box = visBox, name = visName, trace = visTrace },
           flags = {
             box = F.esp_box, hp = F.esp_health, tracer = F.esp_tracer,
             name = F.esp_name, dist = F.esp_dist, weapon = F.esp_weapon,
