@@ -127,7 +127,6 @@ return function(api)
   local function V2(x, y) return Vector2.new(fin(x), fin(y)) end
   -- per-section error counters (see About debug line): silence with telemetry
   local dbg = { fps = 0, frames = 0, fpsT = 0, err = {}, last = "" }
-  local drawn = { box = 0, txt = 0 } -- lifetime draw counters (debug)
   local function guarded(sec, fn)
     local ok, e = pcall(fn)
     if not ok then
@@ -139,27 +138,6 @@ return function(api)
     local ok, cf, size = pcall(function() return model:GetBoundingBox() end)
     if ok and cf and size then return cf, size end
     return nil, nil
-  end
-  local function drawBox2D(x0, y0, w, h, col, thick)
-    x0, y0, w, h = fin(x0), fin(y0), math.abs(fin(w)), math.abs(fin(h))
-    if w < 1 or h < 1 then return end
-    drawn.box = drawn.box + 1
-    -- Drawing Transparency: 0 = opaque, 1 = invisible
-    local tl = shape("Line"); tl.Color = col; tl.Thickness = thick; tl.Transparency = 0
-    local tr = shape("Line"); tr.Color = col; tr.Thickness = thick; tr.Transparency = 0
-    local bl = shape("Line"); bl.Color = col; bl.Thickness = thick; bl.Transparency = 0
-    local br = shape("Line"); br.Color = col; br.Thickness = thick; br.Transparency = 0
-    tl.From = V2(x0, y0); tl.To = V2(x0 + w, y0)
-    tr.From = V2(x0, y0); tr.To = V2(x0, y0 + h)
-    bl.From = V2(x0 + w, y0); bl.To = V2(x0 + w, y0 + h)
-    br.From = V2(x0, y0 + h); br.To = V2(x0 + w, y0 + h)
-  end
-  local function drawText(cx, y, str, col, size)
-    drawn.txt = drawn.txt + 1
-    local t = shape("Text")
-    t.Color = col; t.Size = size or 13; t.Center = true; t.Outline = true; t.Transparency = 0
-    t.Text = tostring(str):sub(1, 80)
-    t.Position = V2(cx, y)
   end
   -- true when a rect is at least partly on screen (with margin)
   local function onScreen2(x0, y0, w, h, vs, m)
@@ -209,6 +187,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   local lootCache, corpseCache, npcCache, exitCache = {}, {}, {}, {}
   local scanTick = 0
+  local syncLabelMaps -- fwd: defined below scanWorld, runs on ticks
   local function hlKeys()
     local out = {}
     for k in tostring(F.loot_keys or ""):gmatch("[^,]+") do
@@ -256,7 +235,7 @@ return function(api)
                   if string.find(ln, k, 1, true) then star = true break end
                 end
               end
-              table.insert(lootCache, { pos = cf.Position, name = nm, kind = kind, star = star })
+              table.insert(lootCache, { pos = cf.Position, name = nm, kind = kind, star = star, m = v })
             end
           end
         end
@@ -276,7 +255,7 @@ return function(api)
             local cf = select(1, boxOf(v))
             table.insert(corpseCache, {
               pos = cf and cf.Position or nil,
-              name = v.Name, isPlayer = isPlayerModel(v),
+              name = v.Name, isPlayer = isPlayerModel(v), m = v,
             })
           elseif not liveChars[v] and not isPlayerModel(v) then
             -- NPC trader/boss (has HP, nobody's character)
@@ -292,10 +271,69 @@ return function(api)
     if ex then
       for _, v in ipairs(ex:GetChildren()) do
         if v:IsA("BasePart") then
-          table.insert(exitCache, { pos = v.Position, name = v.Name })
+          table.insert(exitCache, { pos = v.Position, name = v.Name, part = v })
         end
       end
     end
+    syncLabelMaps()
+  end
+
+  -- persistent label objects (zero per-frame allocation): created on
+  -- discovery during scans, updated per frame, destroyed when gone
+  local lootMap, corpseMap, npcMap, exitMap = {}, {}, {}, {}
+  local function mkLabel(size)
+    local t = shape("Text")
+    t.Center = true; t.Outline = true; t.Transparency = 0
+    t.Size = size or 12; t.Visible = false
+    return t
+  end
+  local function killDraw(o) pcall(function() o:Remove() end) end
+  function syncLabelMaps()
+    local seenL, seenC, seenN, seenE = {}, {}, {}, {}
+    for _, it in ipairs(lootCache) do
+      local m = it.m
+      if m and m.Parent then
+        seenL[m] = true
+        if not lootMap[m] then lootMap[m] = { lbl = mkLabel(12) } end
+        it.lbl = lootMap[m].lbl
+      else
+        it.lbl = nil
+      end
+    end
+    for _, c in ipairs(corpseCache) do
+      local m = c.m
+      if m and m.Parent then
+        seenC[m] = true
+        if not corpseMap[m] then corpseMap[m] = { lbl = mkLabel(13) } end
+        c.lbl = corpseMap[m].lbl
+      else
+        c.lbl = nil
+      end
+    end
+    for _, npc in ipairs(npcCache) do
+      local m = npc.model
+      if m and m.Parent then
+        seenN[m] = true
+        if not npcMap[m] then npcMap[m] = { lbl = mkLabel(12) } end
+        npc.lbl = npcMap[m].lbl
+      else
+        npc.lbl = nil
+      end
+    end
+    for _, e in ipairs(exitCache) do
+      local p = e.part
+      if p and p.Parent then
+        seenE[p] = true
+        if not exitMap[p] then exitMap[p] = { lbl = mkLabel(14) } end
+        e.lbl = exitMap[p].lbl
+      else
+        e.lbl = nil
+      end
+    end
+    for m, o in pairs(lootMap) do if not seenL[m] then killDraw(o.lbl) lootMap[m] = nil end end
+    for m, o in pairs(corpseMap) do if not seenC[m] then killDraw(o.lbl) corpseMap[m] = nil end end
+    for m, o in pairs(npcMap) do if not seenN[m] then killDraw(o.lbl) npcMap[m] = nil end end
+    for p, o in pairs(exitMap) do if not seenE[p] then killDraw(o.lbl) exitMap[p] = nil end end
   end
 
   -- --------------------------------------------------------------------------
@@ -338,6 +376,78 @@ return function(api)
       end
     end
   end
+
+  -- --------------------------------------------------------------------------
+  -- Persistent player rigs (universal-style): objects are created ONCE per
+  -- player and only repositioned per frame — zero per-frame allocation, so
+  -- executor Drawing throttles/rate quirks cannot blank the ESP.
+  -- --------------------------------------------------------------------------
+  local pesc = {}
+  local function mkSq(fill)
+    local s = shape("Square")
+    pcall(function()
+      s.Filled = fill == true
+      s.Visible = false
+    end)
+    return s
+  end
+  local function mkTx(size)
+    local t = shape("Text")
+    pcall(function()
+      t.Center = true
+      t.Outline = true
+      t.Transparency = 0
+      t.Size = size or 13
+      t.Visible = false
+    end)
+    return t
+  end
+  local function mkLn()
+    local l = shape("Line")
+    pcall(function()
+      l.Transparency = 0
+      l.Visible = false
+    end)
+    return l
+  end
+  local function rigOf(plr)
+    local e = pesc[plr]
+    if e then return e end
+    e = { corners = {} }
+    e.outline = mkSq(false)
+    e.box = mkSq(false)
+    e.hback = mkSq(true)
+    e.hfill = mkSq(true)
+    e.name = mkTx(13)
+    e.weapon = mkTx(12)
+    e.trace = mkLn()
+    for i = 1, 8 do e.corners[i] = mkLn() end
+    pesc[plr] = e
+    return e
+  end
+  local function hideRig(e)
+    if not e then return end
+    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "weapon", "trace" }) do
+      local o = e[k]
+      if o then pcall(function() o.Visible = false end) end
+    end
+    if e.corners then
+      for _, l in ipairs(e.corners) do pcall(function() l.Visible = false end) end
+    end
+  end
+  local function freeRig(plr)
+    local e = pesc[plr]
+    if not e then return end
+    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "weapon", "trace" }) do
+      local o = e[k]
+      if o then pcall(function() o:Remove() end) end
+    end
+    if e.corners then
+      for _, l in ipairs(e.corners) do pcall(function() l:Remove() end) end
+    end
+    pesc[plr] = nil
+  end
+  reg(players.PlayerRemoving:Connect(function(plr) freeRig(plr) end))
 
   -- --------------------------------------------------------------------------
   -- Aim state
@@ -387,68 +497,120 @@ return function(api)
       local seenGlow = {}
       nP, nC, nL = 0, 0, 0
 
-      -- players (per-player guarded: one bad rig must not kill the frame)
+      -- players (persistent rigs: props updated, hidden when invalid)
       if meHRP then
         for _, pl in ipairs(players:GetPlayers()) do
           if pl ~= LP then
             guarded("players", function()
+              local e = rigOf(pl)
               local ch = pl.Character
               if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
               local hum = ch and ch:FindFirstChildOfClass("Humanoid")
               local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-              if not (ch and hum and hum.Health > 0 and hrp) then return end
+              if not (ch and hum and hum.Health > 0 and hrp) then hideRig(e) return end
               local d = (meHRP.Position - hrp.Position).Magnitude
-              if d ~= d or d > F.esp_range then return end
+              if d ~= d or d > F.esp_range then hideRig(e) return end
               nP = nP + 1
-              -- glow FIRST (presence beats decoration; survives draw faults)
+              -- glow FIRST (presence beats decoration)
               if F.glow_on then
                 local key = "p_" .. ch:GetDebugId()
                 setGlow(ch, F.glow_enemy, true, "p")
                 seenGlow[key] = true
               end
               local cf, size = boxOf(ch)
-              if not (cf and size) then return end
+              if not (cf and size) then hideRig(e) return end
               local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
               local bot3 = cf.Position - Vector3.new(0, size.Y / 2, 0)
               local t2, tOn = wts(top3)
               local b2, bOn = wts(bot3)
-              if not (tOn or bOn) then return end
+              if not (tOn or bOn) then hideRig(e) return end
               local h = math.max(math.abs(b2.Y - t2.Y), 8)
               local w = math.max(h * 0.55, 8)
               local cx = (t2.X + b2.X) / 2
               local x0, y0 = cx - w / 2, math.min(t2.Y, b2.Y)
-              if not onScreen2(x0, y0, w, h, vs, 120) then return end
+              if not onScreen2(x0, y0, w, h, vs, 120) then hideRig(e) return end
               local col = F.esp_enemy
               local th = F.esp_thick or 2
-              if F.esp_box then drawBox2D(x0, y0, w, h, col, th) end
-              -- visible outline: fat frame ONLY when the target is not
-              -- behind a wall (raycast), so open targets pop instantly
-              if F.glow_vis and isVisible(camera.CFrame.Position, hrp.Position, ch, true) then
-                drawBox2D(x0 - 3, y0 - 3, w + 6, h + 6, F.glow_viscol, F.glow_visthick or 3)
+              local dm = math.floor(d + 0.5) .. "m"
+              e.outline.Visible = F.esp_box == true
+              if e.outline.Visible then
+                e.outline.Color = Color3.new(0, 0, 0)
+                e.outline.Thickness = th + 2
+                e.outline.Position = V2(x0 - 1, y0 - 1)
+                e.outline.Size = V2(w + 2, h + 2)
               end
-              if F.esp_health and hum.MaxHealth > 0 then
+              e.box.Visible = F.esp_box == true
+              if e.box.Visible then
+                e.box.Color = col
+                e.box.Thickness = th
+                e.box.Position = V2(x0, y0)
+                e.box.Size = V2(w, h)
+              end
+              -- visible outline: fat corners ONLY when not behind a wall
+              local showVis = F.glow_vis
+                and isVisible(camera.CFrame.Position, hrp.Position, ch, true)
+              if showVis then
+                local L = clamp(math.min(w, h) * 0.28, 5, 26)
+                local vt = F.glow_visthick or 3
+                local pts = {
+                  { V2(x0, y0 + L), V2(x0, y0) },
+                  { V2(x0, y0), V2(x0 + L, y0) },
+                  { V2(x0 + w - L, y0), V2(x0 + w, y0) },
+                  { V2(x0 + w, y0), V2(x0 + w, y0 + L) },
+                  { V2(x0, y0 + h - L), V2(x0, y0 + h) },
+                  { V2(x0, y0 + h), V2(x0 + L, y0 + h) },
+                  { V2(x0 + w - L, y0 + h), V2(x0 + w, y0 + h) },
+                  { V2(x0 + w, y0 + h), V2(x0 + w, y0 + h - L) },
+                }
+                for i = 1, 8 do
+                  local ln = e.corners[i]
+                  ln.Visible = true
+                  ln.From = pts[i][1]
+                  ln.To = pts[i][2]
+                  ln.Color = F.glow_viscol
+                  ln.Thickness = vt
+                end
+              else
+                for i = 1, 8 do e.corners[i].Visible = false end
+              end
+              local showHp = F.esp_health and hum.MaxHealth > 0
+              e.hback.Visible = showHp
+              e.hfill.Visible = showHp
+              if showHp then
                 local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
-                local bar = shape("Line")
-                bar.Color = { R = 0, G = 0, B = 0 }; bar.Thickness = th; bar.Transparency = 0
-                bar.From = V2(x0 - 5, y0); bar.To = V2(x0 - 5, y0 + h)
-                local fg = shape("Line")
-                fg.Color = { R = 1 - frac, G = frac * 0.9, B = 0.15 }
-                fg.Thickness = th; fg.Transparency = 0
-                fg.From = V2(x0 - 5, y0 + h)
-                fg.To = V2(x0 - 5, y0 + h - h * frac)
+                e.hback.Color = Color3.new(0, 0, 0)
+                e.hback.Thickness = th
+                e.hback.Position = V2(x0 - 7, y0)
+                e.hback.Size = V2(3, h)
+                e.hfill.Color = Color3.new(1 - frac, frac * 0.9, 0.15)
+                e.hfill.Thickness = th
+                e.hfill.Position = V2(x0 - 7, y0 + h * (1 - frac))
+                e.hfill.Size = V2(3, math.max(h * frac, 1))
               end
-              if F.esp_tracer then
-                local tr = shape("Line")
-                tr.Color = col; tr.Thickness = 1; tr.Transparency = 0.6
-                tr.From = V2(vs.X / 2, vs.Y); tr.To = V2(cx, y0 + h)
+              e.trace.Visible = F.esp_tracer == true
+              if e.trace.Visible then
+                e.trace.Color = col
+                e.trace.Thickness = 1
+                e.trace.Transparency = 0.6
+                e.trace.From = V2(vs.X / 2, vs.Y)
+                e.trace.To = V2(cx, y0 + h)
               end
-              local up = {}
-              if F.esp_name then table.insert(up, pl.Name) end
-              if F.esp_dist then table.insert(up, math.floor(d + 0.5) .. "m") end
-              if #up > 0 then drawText(cx, y0 - 16, table.concat(up, "  "), col, 13) end
-              if F.esp_weapon then
-                local g = gunName(ch)
-                if g then drawText(cx, y0 + h + 3, g, { R = 1, G = 1, B = 1 }, 12) end
+              local showNm = F.esp_name or F.esp_dist
+              e.name.Visible = showNm
+              if showNm then
+                local parts = {}
+                if F.esp_name then table.insert(parts, pl.Name) end
+                if F.esp_dist then table.insert(parts, dm) end
+                e.name.Text = table.concat(parts, "  ")
+                e.name.Color = col
+                e.name.Position = V2(cx, y0 - 16)
+              end
+              local g = F.esp_weapon and gunName(ch) or nil
+              e.weapon.Visible = g ~= nil
+              if g then
+                e.weapon.Text = g
+                e.weapon.Color = Color3.new(1, 1, 1)
+                e.weapon.Position = V2(cx, y0 + h + 3)
               end
             end)
           end
@@ -460,14 +622,19 @@ return function(api)
         guarded("npc", function()
           for _, npc in ipairs(npcCache) do
             local m = npc.model
+            local L = npc.lbl
+            if L then L.Visible = false end
             if m and m.Parent and npc.hum.Health > 0 then
               local d = (meHRP.Position - npc.hrp.Position).Magnitude
               if d == d and d <= F.npc_range then
                 local cf, size = boxOf(m)
                 if cf and size then
                   local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
-                  if tOn then
-                    drawText(t2.X, t2.Y - 8, npc.name .. "  " .. math.floor(d + 0.5) .. "m", F.npc_col, 12)
+                  if tOn and L then
+                    L.Text = npc.name .. "  " .. math.floor(d + 0.5) .. "m"
+                    L.Color = F.npc_col
+                    L.Position = V2(t2.X, t2.Y - 8)
+                    L.Visible = true
                   end
                 end
                 if F.glow_npc then
@@ -485,7 +652,9 @@ return function(api)
       if F.corpse_on and meHRP then
         guarded("corpse", function()
           for _, c in ipairs(corpseCache) do
-            if c.pos then
+            local L = c.lbl
+            if L then L.Visible = false end
+            if c.pos and L then
               local showAI = c.isPlayer or F.corpse_ai
               if showAI then
                 local d = (meHRP.Position - c.pos).Magnitude
@@ -495,13 +664,20 @@ return function(api)
                   local sp, on = wts(c.pos + Vector3.new(0, 1, 0))
                   if on then
                     local tag = (c.isPlayer and "[BODY] " or "[AI] ") .. c.name
-                    drawText(sp.X, sp.Y, tag .. "  " .. math.floor(d + 0.5) .. "m", col, 13)
+                    L.Text = tag .. "  " .. math.floor(d + 0.5) .. "m"
+                    L.Color = col
+                    L.Position = V2(sp.X, sp.Y)
+                    L.Visible = true
                   end
                 end
               end
             end
           end
         end)
+      else
+        for _, c in ipairs(corpseCache) do
+          if c.lbl then c.lbl.Visible = false end
+        end
       end
       if F.glow_corpse and meHRP then
         guarded("corpseGlow", function()
@@ -520,14 +696,16 @@ return function(api)
         end)
       end
 
-      -- loot
+      -- loot (persistent labels)
       if meHRP and (F.loot_cont or F.loot_drop or F.loot_quest) then
         guarded("loot", function()
           for _, it in ipairs(lootCache) do
+            local L = it.lbl
+            if L then L.Visible = false end
             local want = (it.kind == "drop" and F.loot_drop)
               or (it.kind == "quest" and F.loot_quest)
               or (F.loot_cont) -- cont + spawn
-            if want and it.pos then
+            if want and it.pos and L then
               local d = (meHRP.Position - it.pos).Magnitude
               if d == d and d <= F.loot_range then
                 nL = nL + 1
@@ -535,29 +713,46 @@ return function(api)
                 if on then
                   local col = it.star and F.loot_hlcol or F.loot_col
                   local nm = (it.star and "* " or "") .. it.name
-                  drawText(sp.X, sp.Y, nm .. "  " .. math.floor(d + 0.5) .. "m", col, it.star and 14 or 12)
+                  L.Text = nm .. "  " .. math.floor(d + 0.5) .. "m"
+                  L.Color = col
+                  L.Size = it.star and 14 or 12
+                  L.Position = V2(sp.X, sp.Y)
+                  L.Visible = true
                 end
               end
             end
           end
         end)
+      else
+        for _, it in ipairs(lootCache) do
+          if it.lbl then it.lbl.Visible = false end
+        end
       end
 
-      -- exits
+      -- exits (persistent labels)
       if F.exit_on and meHRP then
         guarded("exits", function()
           for _, e in ipairs(exitCache) do
-            if e.pos then
+            local L = e.lbl
+            if L then L.Visible = false end
+            if e.pos and L then
               local d = (meHRP.Position - e.pos).Magnitude
               if d == d and d <= F.exit_range then
                 local sp, on = wts(e.pos)
                 if on then
-                  drawText(sp.X, sp.Y, "EXIT  " .. math.floor(d + 0.5) .. "m", F.exit_col, 14)
+                  L.Text = "EXIT  " .. math.floor(d + 0.5) .. "m"
+                  L.Color = F.exit_col
+                  L.Position = V2(sp.X, sp.Y)
+                  L.Visible = true
                 end
               end
             end
           end
         end)
+      else
+        for _, e in ipairs(exitCache) do
+          if e.lbl then e.lbl.Visible = false end
+        end
       end
 
       -- radar
@@ -801,6 +996,13 @@ return function(api)
     shapes, prevShapes = {}, {}
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
+    for pl in pairs(pesc) do freeRig(pl) end
+    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap }) do
+      for m, o in pairs(maps) do
+        if o.lbl then pcall(function() o.lbl:Remove() end) end
+        maps[m] = nil
+      end
+    end
     local g = getgenv and getgenv()
     if g then
       if g.__HUMA_PLACE and g.__HUMA_PLACE.Unload == unloadModule then g.__HUMA_PLACE = nil end
@@ -817,10 +1019,15 @@ return function(api)
     -- live debug snapshot (flags, errors, counters) for diagnosis
     getgenv().__HUMA_DELTA_DBG = function()
       local ok, snap = pcall(function()
+        local rigs, labels = 0, 0
+        for _ in pairs(pesc) do rigs = rigs + 1 end
+        for _, mp in ipairs({ lootMap, corpseMap, npcMap, exitMap }) do
+          for _ in pairs(mp) do labels = labels + 1 end
+        end
         return {
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
-          drawn = { box = drawn.box, txt = drawn.txt },
+          objs = { rigs = rigs, labels = labels },
           flags = {
             box = F.esp_box, hp = F.esp_health, tracer = F.esp_tracer,
             name = F.esp_name, dist = F.esp_dist, weapon = F.esp_weapon,
