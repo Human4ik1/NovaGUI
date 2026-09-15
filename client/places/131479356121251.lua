@@ -36,8 +36,8 @@ return function(api)
   end
   local S = {
     marker = false, bingo = false,
-    claimed = {}, claimCd = {},
     conns = {}, daubs = 0, claims = 0, calls = 0,
+    claimTries = {}, claimLast = {}, lastCall = 0, enabledAt = 0,
     patCache = nil, patTick = 0,
   }
   getgenv().__HUMA_BINGO = S
@@ -48,6 +48,7 @@ return function(api)
     Notify("Bingo", "BingoRemotes not found — wrong place?", "error")
     return
   end
+  local Daub         = Remotes:WaitForChild("Daub", 10)
   local ClaimBingo   = Remotes:WaitForChild("ClaimBingo", 10)
   local NumberCalled = Remotes:WaitForChild("NumberCalled", 10)
   local CardsAssigned = Remotes:WaitForChild("CardsAssigned", 10)
@@ -75,16 +76,23 @@ return function(api)
   end
 
   --// core: cards -----------------------------------------------------------
+  -- Scoped STRICTLY to CardArea (RowX/SlotY/CardN): BingoGui holds hundreds
+  -- of recycled C-cells outside the live cards — reading them pollutes grids
+  -- and fires bogus daubs.
+  local function cardArea()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local bg = pg and pg:FindFirstChild("BingoGui")
+    return bg and bg:FindFirstChild("CardArea")
+  end
+
   local function cards()
     local out = {}
-    local pg = LP:FindFirstChild("PlayerGui")
-    if not pg then return out end
-    local bg = pg:FindFirstChild("BingoGui")
-    if not bg then return out end
-    for _, cell in ipairs(bg:GetDescendants()) do
+    local area = cardArea()
+    if not area then return out end
+    for _, cell in ipairs(area:GetDescendants()) do
       if cell.ClassName == "ImageButton" and cell.Name:match("^C%d_%d$") then
         local p, idx = cell.Parent, nil
-        while p and p ~= bg do
+        while p and p ~= area do
           local n = p.Name:match("^Card(%d+)$")
           if n then idx = tonumber(n) break end
           p = p.Parent
@@ -210,75 +218,123 @@ return function(api)
     return okm
   end
 
+  -- Fire the game's OWN cell handlers (they resolve the server card slot
+  -- themselves — verified live: SlotN == visual CardN). Falls back to a
+  -- direct Daub:FireServer(slot, col, row, true) with no connections.
+  local function fireCellAll(idx, col, row, ref)
+    local n = 0
+    if ref then
+      pcall(function()
+        for _, cn in ipairs(getconnections(ref.Activated)) do
+          pcall(function() cn:Fire() end)
+          n = n + 1
+        end
+      end)
+    end
+    if n == 0 and Daub then
+      if pcall(function() Daub:FireServer(idx, col, row, true) end) then n = 1 end
+    end
+    return n
+  end
+
   local function fireCell(idx, col, row)
-    local okf = false
+    local g = cards()[idx]
+    if not g then return false end
+    for _, c2 in pairs(g) do
+      if c2.col == col and c2.row == row and c2.ref then
+        return fireCellAll(idx, col, row, c2.ref) > 0
+      end
+    end
+    return false
+  end
+
+  -- Claim with a retry budget (max 8 tries, ≥3s apart) instead of a
+  -- permanent lock: the reconciler retries while the card is still winning.
+  local function tryClaim(idx)
+    local now = os.clock()
+    local tries = S.claimTries[idx] or 0
+    if tries >= 8 then return end
+    if now - (S.claimLast[idx] or 0) < 3 then return end
+    S.claimTries[idx] = tries + 1
+    S.claimLast[idx] = now
+    S.claims = S.claims + 1
+    -- primary path: the game's own Bingo button (its handler picks the
+    -- winning card itself — no arg guessing). Fallback: direct ClaimBingo.
     pcall(function()
-      local g = cards()[idx]
-      if g then
-        for _, c2 in pairs(g) do
-          if c2.col == col and c2.row == row and c2.ref then
-            for _, cn in ipairs(getconnections(c2.ref.Activated)) do
-              pcall(function() cn:Fire() end)
-            end
-            okf = true
-          end
+      local pg = LP:FindFirstChild("PlayerGui")
+      local bg = pg and pg:FindFirstChild("BingoGui")
+      local btn = bg and bg:FindFirstChild("BingoButton")
+      if btn then
+        for _, cn in ipairs(getconnections(btn.Activated)) do
+          pcall(function() cn:Fire() end)
         end
       end
     end)
-    return okf
-  end
-
-  local function tryClaim(idx)
-    local now = os.clock()
-    if S.claimed[idx] then return end
-    if (S.claimCd[idx] or 0) + 5 > now then return end
-    S.claimCd[idx] = now
-    S.claimed[idx] = true
-    S.claims = S.claims + 1
     pcall(function() ClaimBingo:FireServer(idx) end)
-    setStatus("claim sent, card " .. idx)
+    setStatus("claim sent, card " .. idx .. " (try " .. (tries + 1) .. ")")
     refreshStats()
   end
 
-  local function daubNumber(n, src)
+  local function claimPass()
+    if not S.bingo then return end
+    local fresh = cards()
+    for idx, grid in pairs(fresh) do
+      if hasBingo(grid) then tryClaim(idx) end
+    end
+  end
+
+  -- One full pass: daub EVERY unmarked cell holding a called number on
+  -- EVERY card (the old code fired a single cell per number — with 6 cards
+  -- that silently skipped most of the board), then claims on a fresh read.
+  local function sync(src)
+    if not (S.marker or S.bingo) then return 0 end
+    local balls = readBalls()
     local cs = cards()
-    local hit = 0
-    local firedAt = nil
-    for idx, grid in pairs(cs) do
-      for _, cell in pairs(grid) do
-        if cell.num == n and not cell.marked then
-          if S.marker and cell.ref and not firedAt then
-            firedAt = { idx = idx, col = cell.col, row = cell.row }
-            if fireCell(idx, cell.col, cell.row) then
+    local fired, firedList = 0, {}
+    if S.marker then
+      for idx, grid in pairs(cs) do
+        for _, cell in pairs(grid) do
+          if cell.num and balls[cell.num] and not cell.marked and cell.ref then
+            if fireCellAll(idx, cell.col, cell.row, cell.ref) > 0 then
+              fired = fired + 1
               S.daubs = S.daubs + 1
-              hit = 1
+              table.insert(firedList, { idx = idx, col = cell.col, row = cell.row, n = cell.num })
             end
           end
         end
       end
-      if S.bingo and not S.claimed[idx] and hasBingo(grid) then
-        tryClaim(idx)
-      end
     end
-    if firedAt then
+    if fired > 0 then
+      setStatus(src .. ": fired " .. fired .. " (total " .. S.daubs .. ")")
+      refreshStats()
+      -- async verify (server stamps with a delay): retry what is still blank
       task.spawn(function()
         for a = 1, 4 do
           task.wait(0.8)
-          if cellStamp(firedAt.idx, firedAt.col, firedAt.row) then
-            setStatus("marked " .. n .. " OK (total " .. S.daubs .. ")")
-            refreshStats()
-            if S.bingo then
-              local g = cards()[firedAt.idx]
-              if g and hasBingo(g) then tryClaim(firedAt.idx) end
+          local pending = 0
+          for _, f in ipairs(firedList) do
+            if not cellStamp(f.idx, f.col, f.row) then
+              pending = pending + 1
+              local g = cards()[f.idx]
+              if g then
+                for _, c2 in pairs(g) do
+                  if c2.col == f.col and c2.row == f.row and c2.ref then
+                    fireCellAll(f.idx, f.col, f.row, c2.ref)
+                    break
+                  end
+                end
+              end
             end
+          end
+          if pending == 0 then
+            setStatus(src .. ": all " .. #firedList .. " confirmed")
             break
-          else
-            fireCell(firedAt.idx, firedAt.col, firedAt.row) -- retry
           end
         end
       end)
     end
-    return hit
+    claimPass()
+    return fired
   end
 
   local function parseNumber(data)
@@ -303,8 +359,7 @@ return function(api)
 
   local function catchUp()
     task.spawn(function()
-      local total = 0
-      for n in pairs(readBalls()) do total = total + daubNumber(n, "catchup") end
+      local total = sync("catchup")
       setStatus("catch-up: " .. total .. " marks (total " .. S.daubs .. ")")
       refreshStats()
     end)
@@ -313,20 +368,20 @@ return function(api)
   --// events ---------------------------------------------------------------
   table.insert(S.conns, NumberCalled.OnClientEvent:Connect(function(data)
     S.calls = S.calls + 1
+    S.lastCall = os.clock()
     local n = parseNumber(data)
     if not n then setStatus("saw malformed call #" .. S.calls) return end
     if not (S.marker or S.bingo) then setStatus("saw " .. n .. " (toggles off)") return end
-    local hit = daubNumber(n, "live")
-    if hit > 0 then
-      setStatus("daubed " .. n .. " (total " .. S.daubs .. ")")
-    else
-      setStatus("saw " .. n .. " (no match, calls " .. S.calls .. ")")
+    local hit = sync("live")
+    if hit == 0 then
+      setStatus("saw " .. n .. " (nothing new, calls " .. S.calls .. ")")
     end
     refreshStats()
   end))
 
   table.insert(S.conns, CardsAssigned.OnClientEvent:Connect(function()
-    S.claimed = {}
+    S.claimTries = {}
+    S.claimLast = {}
     S.patCache = nil
     setStatus("new round — claims reset")
   end))
@@ -343,7 +398,23 @@ return function(api)
     end))
   end
 
-  --// anti-AFK (same approach as the standalone: input wiggle each 60s) -----
+  --// anti-AFK + self-healing ticker --------------------------------------
+  -- ticker: full sync every 2.5s catches anything events missed (late
+  -- enable, manual completions, dropped packets, slow stamps). Gated by
+  -- recent round activity; claim-only passes still run while quiet.
+  task.spawn(function()
+    while getgenv().__HUMA_BINGO == S do
+      task.wait(2.5)
+      if getgenv().__HUMA_BINGO ~= S then break end
+      if S.marker or S.bingo then
+        local quiet = os.clock() - (S.lastCall or 0) > 90
+          and os.clock() - (S.enabledAt or 0) > 30
+        pcall(function()
+          if quiet then claimPass() else sync("tick") end
+        end)
+      end
+    end
+  end)
   task.spawn(function()
     while getgenv().__HUMA_BINGO == S do
       task.wait(60)
@@ -374,6 +445,7 @@ return function(api)
     Callback = function(v)
       S.marker = v == true
       if S.marker then
+        S.enabledAt = os.clock()
         Notify("Bingo", "Auto Marker running", "ok")
         catchUp()
       end
@@ -383,7 +455,10 @@ return function(api)
     Name = "Auto Bingo", Desc = "Claims instantly on a winning pattern",
     Default = false, Callback = function(v)
       S.bingo = v == true
-      if S.bingo then Notify("Bingo", "Auto Bingo armed", "ok") end
+      if S.bingo then
+        S.enabledAt = os.clock()
+        Notify("Bingo", "Auto Bingo armed", "ok")
+      end
     end,
   })
 
