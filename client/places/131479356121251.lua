@@ -47,7 +47,7 @@ return function(api)
     sentSig = {}, -- board signature at last claim attempt per card
     lastNumForced = false, -- last-number failsafe fires once per round
     rivalClaimed = false, stagePattern = nil, holdMsg = "",
-    patCache = nil, patTick = 0,
+    figCache = nil, figTick = 0,
   }
   getgenv().__HUMA_BINGO = S
 
@@ -74,16 +74,16 @@ return function(api)
   local statsLbl = statSec:Label("daubs 0 · claims 0 · calls 0")
 
   local function refreshStats()
+    -- window label only; the HUD chip keeps the static FIG line
     pcall(function()
       statsLbl.Set(("daubs %d · claims %d · calls %d"):format(S.daubs, S.claims, S.calls))
     end)
-    hud("bingoStats", ("bingo · daubs %d · claims %d · calls %d"):format(S.daubs, S.claims, S.calls))
   end
 
   local function setStatus(t)
+    -- window label only (noisy by design); HUD chip keeps FIG x/6
     print("[huma-bingo] " .. tostring(t))
     pcall(function() statusLbl.Set(tostring(t)) end)
-    hud("bingo", tostring(t))
   end
 
   --// core: cards -----------------------------------------------------------
@@ -133,45 +133,55 @@ return function(api)
     return m
   end
 
-  local function readPattern()
-    if S.patCache and os.clock() - (S.patTick or 0) < 10 then return S.patCache end
-    local pat = nil
+  -- FIGURE (the reliable method): the game draws the required shape in
+  -- StatusPanel: GameTitle.Text is the figure NAME, and PatternPreview cells
+  -- whose Ink child is Visible are the required CELLS (verified live with
+  -- "Letter T": ink on row 1 + column 3, exactly the T). A win = our marks
+  -- cover every ink cell. Works for any figure with zero hardcoded shapes.
+  -- (UIStrokes on the preview are NOT the figure — they mark called numbers.)
+  local function readFigure()
+    if S.figCache and os.clock() - (S.figTick or 0) < 3 then return S.figCache end
+    local fig = { name = "", cells = {} }
     pcall(function()
       local pg = LP:FindFirstChild("PlayerGui")
       local bg = pg and pg:FindFirstChild("BingoGui")
-      if bg then
-        for _, v in ipairs(bg:GetDescendants()) do
-          if v.Name == "PatternPreview" then
-            local stroked, plain, total = {}, {}, 0
-            for _, c in ipairs(v:GetChildren()) do
-              local cc, rr = c.Name:match("^P(%d+)_(%d+)$")
-              if cc and rr then
-                total = total + 1
-                local cell = { col = tonumber(cc), row = tonumber(rr) }
-                if c:FindFirstChildOfClass("UIStroke") then stroked[#stroked + 1] = cell
-                else plain[#plain + 1] = cell end
+      if not bg then return end
+      local sp = bg:FindFirstChild("StatusPanel")
+      local gt = sp and sp:FindFirstChild("GameTitle")
+      if gt then fig.name = tostring(gt.Text) end
+      local prev = bg:FindFirstChild("PatternPreview", true)
+      if prev then
+        for _, c in ipairs(prev:GetChildren()) do
+          local cc, rr = c.Name:match("^P(%d+)_(%d+)$")
+          if cc and rr then
+            for _, ch in ipairs(c:GetChildren()) do
+              if ch.Name == "Ink" then
+                local ok, vis = pcall(function() return ch.Visible end)
+                if ok and vis then
+                  table.insert(fig.cells, { col = tonumber(cc), row = tonumber(rr) })
+                end
+                break
               end
             end
-            if total > 0 then pat = { stroked = stroked, plain = plain } end
-            break
           end
         end
       end
     end)
-    S.patCache, S.patTick = pat, os.clock()
-    return pat
+    S.figCache, S.figTick = fig, os.clock()
+    return fig
   end
 
-  local function covers(m, cells)
-    if #cells == 0 or #cells > 24 then return false end
-    for _, c in ipairs(cells) do
-      if not (m[c.row] and m[c.row][c.col]) then return false end
-    end
-    return true
-  end
-
-  local function hasBingo(grid)
+  local function hasBingo(grid, fig)
     local m = gridMap(grid)
+    if fig and #fig.cells > 0 then
+      -- figure mode: every required cell must be marked
+      if #fig.cells > 25 then return false end
+      for _, c in ipairs(fig.cells) do
+        if not (m[c.row] and m[c.row][c.col]) then return false end
+      end
+      return true
+    end
+    -- fallback (figure unreadable): legacy lines
     for i = 1, 5 do
       local row, col = true, true
       for j = 1, 5 do
@@ -187,8 +197,6 @@ return function(api)
     end
     if d1 or d2 then return true end
     if m[1] and m[5] and m[1][1] and m[1][5] and m[5][1] and m[5][5] then return true end
-    local pat = readPattern()
-    if pat and (covers(m, pat.stroked) or covers(m, pat.plain)) then return true end
     return false
   end
 
@@ -312,14 +320,23 @@ return function(api)
     return table.concat(ks, ",")
   end
 
+  -- Static HUD line: figure + figure-ready count. This is the important
+  -- state — it never scrolls away, unlike the noisy window status.
+  local function pushFigHud(fig, doneN, total)
+    local name = (fig and fig.name ~= "") and fig.name or "?"
+    hud("bingo", ("FIG %s · %d/%d"):format(name, doneN or 0, total or 0))
+  end
+
   local function claimPass(force)
-    if not S.bingo then return end
+    local fig = readFigure()
     local fresh = cards()
     local winners, total = {}, 0
     for idx, grid in pairs(fresh) do
       total = total + 1
-      if hasBingo(grid) then table.insert(winners, { idx = idx, sig = gridSig(grid) }) end
+      if hasBingo(grid, fig) then table.insert(winners, { idx = idx, sig = gridSig(grid) }) end
     end
+    pushFigHud(fig, #winners, total)
+    if not S.bingo then return end
     if #winners == 0 then
       S.holdMsg = ""
       return
@@ -469,7 +486,7 @@ return function(api)
     S.lastNumForced = false
     S.rivalClaimed = false
     S.holdMsg = ""
-    S.patCache = nil
+    S.figCache = nil
     setStatus("new round — claims reset")
     task.spawn(function() pcall(function() sync("round") end) end)
   end))
@@ -614,16 +631,31 @@ return function(api)
   statSec:Button({ Name = "Catch-up now", Variant = "ghost",
     Tooltip = "Mark all already-called numbers",
     Callback = catchUp })
-  statSec:Button({ Name = "Rescan pattern", Variant = "ghost",
-    Tooltip = "Re-read the PatternPreview (cache is 10s)",
+  statSec:Button({ Name = "Rescan figure", Variant = "ghost",
+    Tooltip = "Re-read the required figure from StatusPanel (cache is 3s)",
     Callback = function()
-      S.patCache = nil
-      local pat = readPattern()
-      if pat then
-        setStatus(("pattern: stroked %d · plain %d"):format(#pat.stroked, #pat.plain))
+      S.figCache = nil
+      local fig = readFigure()
+      if fig and #fig.cells > 0 then
+        setStatus(("figure: %s · %d cells"):format(
+          fig.name ~= "" and fig.name or "?", #fig.cells))
       else
-        setStatus("pattern: not found (open the pattern preview?)")
+        setStatus("figure: not found")
       end
+    end })
+  statSec:Button({ Name = "Hide / show cards", Variant = "ghost",
+    Tooltip = "The game keeps running while cards are hidden — farm in your pocket",
+    Callback = function()
+      pcall(function()
+        local pg = LP:FindFirstChild("PlayerGui")
+        local bg = pg and pg:FindFirstChild("BingoGui")
+        local btn = bg and bg:FindFirstChild("HideCardsButton")
+        if btn then
+          for _, cn in ipairs(getconnections(btn.Activated)) do
+            pcall(function() cn:Fire() end)
+          end
+        end
+      end)
     end })
 
   setStatus("module ready — enable Auto Marker / Bingo")
