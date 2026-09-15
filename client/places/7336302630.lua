@@ -23,7 +23,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.6-fix"
+  local MODULE_VERSION = "2.7-navigation"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -76,7 +76,7 @@ return function(api)
     if prev and type(prev.Unload) == "function" then pcall(prev.Unload) end
   end
 
-  -- all features start OFF: enable only what you need, sections start collapsed
+  -- Defaults used until the hub restores the selected profile.
   local F = {
     esp_on = false, -- master switch for the player ESP drawings
     esp_box = false, esp_health = false, esp_tracer = false,
@@ -1273,6 +1273,35 @@ return function(api)
     end)
   end))
 
+  local pages = {}
+  unloadModule = function()
+    if moduleDead then return end -- hub + About button can both call this
+    moduleDead = true
+    for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
+    for _, page in pairs(pages) do page:Destroy() end
+    brightApply(false) -- restore raid lighting
+    freeTransient()
+    for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
+    for k in pairs(glowMap) do glowMap[k] = nil end
+    for pl in pairs(pesc) do freeRig(pl) end
+    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap }) do
+      for m, o in pairs(maps) do
+        if o.lbl then pcall(function() o.lbl:Remove() end) end
+        maps[m] = nil
+      end
+    end
+    local g = getgenv and getgenv()
+    if g then
+      if g.__HUMA_PLACE and g.__HUMA_PLACE.Unload == unloadModule then g.__HUMA_PLACE = nil end
+      if g.__HUMA_DELTA and g.__HUMA_DELTA.Unload == unloadModule then g.__HUMA_DELTA = nil end
+      g.__HUMA_DELTA_DBG = nil
+    end
+    Notify("Delta", "Module unloaded", "info")
+  end
+
+  local hub = { Unload = unloadModule }
+  if getgenv then getgenv().__HUMA_PLACE = hub end
+
   -- --------------------------------------------------------------------------
   -- Nova UI
   -- --------------------------------------------------------------------------
@@ -1298,38 +1327,24 @@ return function(api)
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
 
-  -- Sub-menu: one column of group buttons, one visible group at a time.
-  -- Pure Nova API: groups are normal sections, hidden via .Instance.
-  local groupMap = {}
-  local menuSec = Tab:Section({ Name = "Delta" })
-  menuSec:Paragraph("Pick a section. Everything starts OFF.")
-  local function showGroup(name)
-    menuSec.Instance.Visible = (name == nil)
-    for gn, secs in pairs(groupMap) do
-      local vis = (gn == name)
-      for _, s in ipairs(secs) do
-        if s.Instance then s.Instance.Visible = vis end
-      end
-    end
-  end
+  local nav = api.Navigation or Tab:Navigation({ Name = "Project Delta" })
   local menuDefs = {
-    { "Players", "ESP boxes, names, weapons on players" },
-    { "Aim", "Camera lock, FOV, trigger" },
-    { "Glow", "Chams on players, loot, bodies" },
-    { "Loot", "Crates, drops, keywords, glow" },
-    { "Bodies", "Player + AI corpses" },
-    { "Bots", "Hostile AI ESP, aim, glow" },
-    { "World", "NPC, exits, radar, daylight" },
-    { "About", "Status, debug, unload" },
+    { "Players", "□", "Player ESP: boxes, names and weapons" },
+    { "Aim", "◎", "Camera aim, FOV and activation" },
+    { "Glow", "◇", "Highlights and outlines" },
+    { "Loot", "▣", "Containers, items and keywords" },
+    { "Bodies", "+", "Player and AI bodies" },
+    { "Bots", "◉", "Hostile AI settings" },
+    { "World", "◈", "NPCs, exits, radar and daylight" },
+    { "About", "i", "Status, diagnostics and unload" },
   }
-  for _, d in ipairs(menuDefs) do
-    local gname, gdesc = d[1], d[2]
-    menuSec:Button({ Name = gname, Desc = gdesc, Callback = function()
-      showGroup(gname)
-    end })
+  for index, def in ipairs(menuDefs) do
+    pages[def[1]] = nav:Page({ Id = "delta_" .. def[1]:lower(), Name = def[1],
+      Icon = def[2], Tooltip = def[3], Order = index })
   end
+  pages.Players:Select()
 
-  local pSec = Tab:Section({ Name = "Players", Collapsed = true })
+  local pSec = pages.Players:Section({ Name = "Players" })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
   if not HAS_DRAWING then
     pSec:Paragraph("WARNING: this executor has no Drawing API. Boxes, names, distance, tracers and the radar cannot render. Glow (Highlight) still works.")
@@ -1345,7 +1360,7 @@ return function(api)
   flagSlider(pSec, "Range", "esp_range", 200, 6000, { suf = "m" })
   flagColor(pSec, "Enemy color", "esp_enemy")
 
-  local aSec = Tab:Section({ Name = "Aim", Collapsed = true })
+  local aSec = pages.Aim:Section({ Name = "Aim" })
   aSec:Paragraph("Camera lock only — no packets, no autofire. Smooth + small FOV keeps it human.")
   flagToggle(aSec, "Aim lock", "aim_on")
   flagDropdown(aSec, "Aim part", "aim_part", { "Head", "UpperTorso", "HumanoidRootPart" })
@@ -1359,7 +1374,7 @@ return function(api)
   flagToggle(aSec, "FOV circle", "aim_circle")
   flagToggle(aSec, "Pause while hub open", "aim_pause")
 
-  local gSec = Tab:Section({ Name = "Glow", Collapsed = true })
+  local gSec = pages.Glow:Section({ Name = "Glow" })
   gSec:Paragraph("Client-side Highlights (see-through chams).")
   flagToggle(gSec, "Players", "glow_on")
   flagToggle(gSec, "NPC", "glow_npc")
@@ -1381,7 +1396,7 @@ return function(api)
   flagColor(gSec, "Quest glow", "glow_quest")
   flagColor(gSec, "Star glow", "glow_star")
 
-  local lSec = Tab:Section({ Name = "Loot", Collapsed = true })
+  local lSec = pages.Loot:Section({ Name = "Loot" })
   lSec:Paragraph("Containers, floor drops, quest items. Starred = keyword match.")
   flagToggle(lSec, "Containers", "loot_cont")
   flagToggle(lSec, "Dropped items", "loot_drop")
@@ -1396,7 +1411,7 @@ return function(api)
   flagColor(lSec, "Loot color", "loot_col")
   flagColor(lSec, "Star color", "loot_hlcol")
 
-  local bSec = Tab:Section({ Name = "Bodies", Collapsed = true })
+  local bSec = pages.Bodies:Section({ Name = "Bodies" })
   bSec:Paragraph("Lootable bodies: player corpses + AI corpses, distinct colors.")
   flagToggle(bSec, "Corpses", "corpse_on")
   flagToggle(bSec, "AI bodies", "corpse_ai")
@@ -1404,7 +1419,7 @@ return function(api)
   flagColor(bSec, "Player body", "corpse_col")
   flagColor(bSec, "AI body", "corpse_ai_col")
 
-  local wSec = Tab:Section({ Name = "World", Collapsed = true })
+  local wSec = pages.World:Section({ Name = "World" })
   wSec:Toggle({ Name = "Fullbright", Desc = "Always daylight, no dark corners",
     Default = F.fullbright == true, Flag = "pd_fullbright",
     Tooltip = "Restores raid lighting on off/unload",
@@ -1413,7 +1428,7 @@ return function(api)
       brightApply(F.fullbright)
     end })
   wSec:Paragraph("Bots are hostile AI (Faction). Traders are friendly NPC.")
-  local botSec = Tab:Section({ Name = "Bots", Collapsed = true })
+  local botSec = pages.Bots:Section({ Name = "Bots" })
   botSec:Paragraph("Hostile AI from AiZones (Bandits etc.) — separate from trader NPC.")
   flagToggle(botSec, "Bot ESP", "bot_esp")
   flagToggle(botSec, "Bot glow", "bot_glow")
@@ -1430,7 +1445,7 @@ return function(api)
   flagSlider(wSec, "Radar range", "radar_range", 100, 2000, { suf = "m" })
   flagSlider(wSec, "Radar size", "radar_size", 100, 320, { suf = "px" })
 
-  local aboutSec = Tab:Section({ Name = "About", Collapsed = true })
+  local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("PROJECT DELTA - hub module v" .. MODULE_VERSION .. " (safe build)")
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
@@ -1474,50 +1489,9 @@ return function(api)
     unloadModule()
   end })
 
-  -- register groups + Back buttons, then land on the menu
-  groupMap.Players = { pSec }
-  groupMap.Aim = { aSec }
-  groupMap.Glow = { gSec }
-  groupMap.Loot = { lSec }
-  groupMap.Bodies = { bSec }
-  groupMap.Bots = { botSec }
-  groupMap.World = { wSec }
-  groupMap.About = { aboutSec }
-  for gname, secs in pairs(groupMap) do
-    for _, s in ipairs(secs) do
-      s:Button({ Name = "< Menu", Variant = "ghost", Callback = function()
-        showGroup(nil)
-      end })
-    end
-  end
-  showGroup(nil)
-
   -- --------------------------------------------------------------------------
   -- Unload + boot
   -- --------------------------------------------------------------------------
-  unloadModule = function()
-    if moduleDead then return end -- hub + About button can both call this
-    moduleDead = true
-    for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
-    brightApply(false) -- restore raid lighting
-    freeTransient()
-    for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
-    for k in pairs(glowMap) do glowMap[k] = nil end
-    for pl in pairs(pesc) do freeRig(pl) end
-    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap }) do
-      for m, o in pairs(maps) do
-        if o.lbl then pcall(function() o.lbl:Remove() end) end
-        maps[m] = nil
-      end
-    end
-    local g = getgenv and getgenv()
-    if g then
-      if g.__HUMA_PLACE and g.__HUMA_PLACE.Unload == unloadModule then g.__HUMA_PLACE = nil end
-      if g.__HUMA_DELTA and g.__HUMA_DELTA.Unload == unloadModule then g.__HUMA_DELTA = nil end
-      g.__HUMA_DELTA_DBG = nil
-    end
-    Notify("Delta", "Module unloaded", "info")
-  end
 
   -- background scanner: first pass immediately, then every 2s
   task.spawn(function()
@@ -1529,7 +1503,6 @@ return function(api)
   end)
   if F.fullbright then brightApply(true) end
 
-  local hub = { Unload = unloadModule }
   if getgenv then pcall(function()
     getgenv().__HUMA_DELTA = hub
     getgenv().__HUMA_PLACE = hub -- generic contract: hub unloads the place module
