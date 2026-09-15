@@ -8,7 +8,7 @@
       game scripts/UIs — there is nothing server-side to fingerprint.
     - NO fly / noclip / teleport / speed / autofire / rage on purpose.
     - aim defaults are legit-ish (smooth, small FOV, hold-to-aim, visible
-      check, pause while the hub is open). Snapping 180° across the map is
+      check, pause while the hub is open). Snapping 180 deg across the map is
       still YOUR choice — and still detectable. Play sane.
   Place facts (verified live):
     - no teams (everyone else is hostile), R15, 100hp;
@@ -110,14 +110,28 @@ return function(api)
     local ch = myChar()
     return ch and ch:FindFirstChild("HumanoidRootPart")
   end
-  local function distTo(pos)
-    local hrp = myHRP()
-    if not hrp or not pos then return math.huge end
-    return (hrp.Position - pos).Magnitude
-  end
   local function wts(pos)
     local v = camera:WorldToViewportPoint(pos)
     return Vector2.new(v.X, v.Y), v.Z > 0, v.Z
+  end
+  -- NaN/inf sanitizer: ragdolls, vehicles and camera-plane projections can
+  -- produce non-finite coords; a single bad Vector2 aborts the whole frame
+  -- (silently, inside pcall) and kills ESP/glow for everyone after it.
+  local function fin(x, fb)
+    if type(x) ~= "number" or x ~= x then return fb or 0 end
+    if x == math.huge then return 1e6 end
+    if x == -math.huge then return -1e6 end
+    return x
+  end
+  local function V2(x, y) return Vector2.new(fin(x), fin(y)) end
+  -- per-section error counters (see About debug line): silence with telemetry
+  local dbg = { fps = 0, frames = 0, fpsT = 0, err = {}, last = "" }
+  local function guarded(sec, fn)
+    local ok, e = pcall(fn)
+    if not ok then
+      dbg.err[sec] = (dbg.err[sec] or 0) + 1
+      dbg.last = sec .. ": " .. tostring(e):sub(1, 90)
+    end
   end
   local function boxOf(model)
     local ok, cf, size = pcall(function() return model:GetBoundingBox() end)
@@ -125,21 +139,28 @@ return function(api)
     return nil, nil
   end
   local function drawBox2D(x0, y0, w, h, col, thick)
+    x0, y0, w, h = fin(x0), fin(y0), math.abs(fin(w)), math.abs(fin(h))
+    if w < 1 or h < 1 then return end
     -- Drawing Transparency: 0 = opaque, 1 = invisible
     local tl = shape("Line"); tl.Color = col; tl.Thickness = thick; tl.Transparency = 0
     local tr = shape("Line"); tr.Color = col; tr.Thickness = thick; tr.Transparency = 0
     local bl = shape("Line"); bl.Color = col; bl.Thickness = thick; bl.Transparency = 0
     local br = shape("Line"); br.Color = col; br.Thickness = thick; br.Transparency = 0
-    tl.From = Vector2.new(x0, y0); tl.To = Vector2.new(x0 + w, y0)
-    tr.From = Vector2.new(x0, y0); tr.To = Vector2.new(x0, y0 + h)
-    bl.From = Vector2.new(x0 + w, y0); bl.To = Vector2.new(x0 + w, y0 + h)
-    br.From = Vector2.new(x0, y0 + h); br.To = Vector2.new(x0 + w, y0 + h)
+    tl.From = V2(x0, y0); tl.To = V2(x0 + w, y0)
+    tr.From = V2(x0, y0); tr.To = V2(x0, y0 + h)
+    bl.From = V2(x0 + w, y0); bl.To = V2(x0 + w, y0 + h)
+    br.From = V2(x0, y0 + h); br.To = V2(x0 + w, y0 + h)
   end
   local function drawText(cx, y, str, col, size)
     local t = shape("Text")
     t.Color = col; t.Size = size or 13; t.Center = true; t.Outline = true; t.Transparency = 0
-    t.Text = str
-    t.Position = Vector2.new(cx, y)
+    t.Text = tostring(str):sub(1, 80)
+    t.Position = V2(cx, y)
+  end
+  -- true when a rect is at least partly on screen (with margin)
+  local function onScreen2(x0, y0, w, h, vs, m)
+    m = m or 80
+    return x0 + w > -m and x0 < vs.X + m and y0 + h > -m and y0 < vs.Y + m
   end
   local function isVisible(from, to, ignoreChar)
     if not F.aim_vis then return true end
@@ -237,7 +258,7 @@ return function(api)
         end
       end
     end
-    -- corpses + npc: workspace models with a Humanoid that are not players' live chars
+    -- corpses + npc: workspace models with a Humanoid that are not live chars
     local liveChars = {}
     for _, pl in ipairs(players:GetPlayers()) do
       local ch = pl.Character
@@ -342,284 +363,317 @@ return function(api)
   -- --------------------------------------------------------------------------
   reg(runService.RenderStepped:Connect(function(dt)
     pcall(function()
-    camera = workspace.CurrentCamera or camera
-    if not camera then return end
-    frameBegin()
-    local now = os.clock()
-    if now - scanTick > 2 then scanTick = now pcall(scanWorld) end
+      camera = workspace.CurrentCamera or camera
+      if not camera then return end
+      frameBegin()
+      local now = os.clock()
+      dbg.frames = dbg.frames + 1
+      if now - dbg.fpsT >= 1 then
+        dbg.fps = math.floor(dbg.frames / math.max(now - dbg.fpsT, 0.01) + 0.5)
+        dbg.frames, dbg.fpsT = 0, now
+      end
+      if now - scanTick > 2 then
+        scanTick = now
+        pcall(scanWorld)
+      end
 
-    local me = myChar()
-    local meHRP = me and me:FindFirstChild("HumanoidRootPart")
-    local vs = camera.ViewportSize
-    local seenGlow = {}
-    nP, nC, nL = 0, 0, 0
+      local me = myChar()
+      local meHRP = me and me:FindFirstChild("HumanoidRootPart")
+      local vs = camera.ViewportSize
+      local seenGlow = {}
+      nP, nC, nL = 0, 0, 0
 
-    -- players --
-    if meHRP then
-      for _, pl in ipairs(players:GetPlayers()) do
-        if pl ~= LP then
-          local ch = pl.Character
-          if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
-          local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-          local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-          if ch and hum and hum.Health > 0 and hrp then
-            local d = (meHRP.Position - hrp.Position).Magnitude
-            if d <= F.esp_range then
+      -- players (per-player guarded: one bad rig must not kill the frame)
+      if meHRP then
+        for _, pl in ipairs(players:GetPlayers()) do
+          if pl ~= LP then
+            guarded("players", function()
+              local ch = pl.Character
+              if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
+              local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+              local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+              if not (ch and hum and hum.Health > 0 and hrp) then return end
+              local d = (meHRP.Position - hrp.Position).Magnitude
+              if d ~= d or d > F.esp_range then return end
               nP = nP + 1
-              local cf, size = boxOf(ch)
-              if cf and size then
-                local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
-                local bot3 = cf.Position - Vector3.new(0, size.Y / 2, 0)
-                local t2, tOn = wts(top3)
-                local b2, bOn = wts(bot3)
-                if (tOn or bOn) and t2.Z > 0 and b2.Z > 0 then
-                  local h = math.max(math.abs(b2.Y - t2.Y), 8)
-                  local w = math.max(h * 0.55, 8)
-                  local cx = (t2.X + b2.X) / 2
-                  local x0, y0 = cx - w / 2, math.min(t2.Y, b2.Y)
-                  local col = F.esp_enemy
-                  local th = F.esp_thick or 2
-                  if F.esp_box then drawBox2D(x0, y0, w, h, col, th) end
-                  if F.esp_health and hum.MaxHealth > 0 then
-                    local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
-                    local bar = shape("Line")
-                    bar.Color = { R = 0, G = 0, B = 0 }; bar.Thickness = th; bar.Transparency = 0
-                    bar.From = Vector2.new(x0 - 5, y0); bar.To = Vector2.new(x0 - 5, y0 + h)
-                    local fg = shape("Line")
-                    fg.Color = { R = 1 - frac, G = frac * 0.9, B = 0.15 }
-                    fg.Thickness = th; fg.Transparency = 0
-                    fg.From = Vector2.new(x0 - 5, y0 + h)
-                    fg.To = Vector2.new(x0 - 5, y0 + h - h * frac)
-                  end
-                  if F.esp_tracer then
-                    local tr = shape("Line")
-                    tr.Color = col; tr.Thickness = 1; tr.Transparency = 0.6
-                    tr.From = Vector2.new(vs.X / 2, vs.Y); tr.To = Vector2.new(cx, y0 + h)
-                  end
-                  local up = {}
-                  if F.esp_name then table.insert(up, pl.Name) end
-                  if F.esp_dist then table.insert(up, math.floor(d + 0.5) .. "m") end
-                  if #up > 0 then drawText(cx, y0 - 16, table.concat(up, "  "), col, 13) end
-                  if F.esp_weapon then
-                    local g = gunName(ch)
-                    if g then drawText(cx, y0 + h + 3, g, { R = 1, G = 1, B = 1 }, 12) end
-                  end
-                end
-              end
+              -- glow FIRST (presence beats decoration; survives draw faults)
               if F.glow_on then
                 local key = "p_" .. ch:GetDebugId()
                 setGlow(ch, F.glow_enemy, true, "p")
                 seenGlow[key] = true
               end
-            end
-          end
-        end
-      end
-    end
-
-    -- npc (traders/bosses) --
-    if F.npc_on and meHRP then
-      for _, npc in ipairs(npcCache) do
-        local m = npc.model
-        if m and m.Parent and npc.hum.Health > 0 then
-          local d = (meHRP.Position - npc.hrp.Position).Magnitude
-          if d <= F.npc_range then
-            local cf, size = boxOf(m)
-            if cf and size then
-              local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
-              if tOn and t2.Z > 0 then
-                drawText(t2.X, t2.Y - 8, npc.name .. "  " .. math.floor(d + 0.5) .. "m", F.npc_col, 12)
+              local cf, size = boxOf(ch)
+              if not (cf and size) then return end
+              local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
+              local bot3 = cf.Position - Vector3.new(0, size.Y / 2, 0)
+              local t2, tOn = wts(top3)
+              local b2, bOn = wts(bot3)
+              if not (tOn or bOn) then return end
+              local h = math.max(math.abs(b2.Y - t2.Y), 8)
+              local w = math.max(h * 0.55, 8)
+              local cx = (t2.X + b2.X) / 2
+              local x0, y0 = cx - w / 2, math.min(t2.Y, b2.Y)
+              if not onScreen2(x0, y0, w, h, vs, 120) then return end
+              local col = F.esp_enemy
+              local th = F.esp_thick or 2
+              if F.esp_box then drawBox2D(x0, y0, w, h, col, th) end
+              if F.esp_health and hum.MaxHealth > 0 then
+                local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
+                local bar = shape("Line")
+                bar.Color = { R = 0, G = 0, B = 0 }; bar.Thickness = th; bar.Transparency = 0
+                bar.From = V2(x0 - 5, y0); bar.To = V2(x0 - 5, y0 + h)
+                local fg = shape("Line")
+                fg.Color = { R = 1 - frac, G = frac * 0.9, B = 0.15 }
+                fg.Thickness = th; fg.Transparency = 0
+                fg.From = V2(x0 - 5, y0 + h)
+                fg.To = V2(x0 - 5, y0 + h - h * frac)
               end
-            end
-            if F.glow_npc then
-              local key = "n_" .. m:GetDebugId()
-              setGlow(m, F.npc_col, true, "n")
-              seenGlow[key] = true
-            end
-          end
-        end
-      end
-    end
-
-    -- corpses --
-    if F.corpse_on and meHRP then
-      for _, c in ipairs(corpseCache) do
-        if c.pos then
-          local showAI = c.isPlayer or F.corpse_ai
-          if showAI then
-            local d = (meHRP.Position - c.pos).Magnitude
-            if d <= F.corpse_range then
-              nC = nC + 1
-              local col = c.isPlayer and F.corpse_col or F.corpse_ai_col
-              local sp, on = wts(c.pos + Vector3.new(0, 1, 0))
-              if on and sp.Z > 0 then
-                local tag = (c.isPlayer and "[BODY] " or "[AI] ") .. c.name
-                drawText(sp.X, sp.Y, tag .. "  " .. math.floor(d + 0.5) .. "m", col, 13)
+              if F.esp_tracer then
+                local tr = shape("Line")
+                tr.Color = col; tr.Thickness = 1; tr.Transparency = 0.6
+                tr.From = V2(vs.X / 2, vs.Y); tr.To = V2(cx, y0 + h)
               end
-            end
+              local up = {}
+              if F.esp_name then table.insert(up, pl.Name) end
+              if F.esp_dist then table.insert(up, math.floor(d + 0.5) .. "m") end
+              if #up > 0 then drawText(cx, y0 - 16, table.concat(up, "  "), col, 13) end
+              if F.esp_weapon then
+                local g = gunName(ch)
+                if g then drawText(cx, y0 + h + 3, g, { R = 1, G = 1, B = 1 }, 12) end
+              end
+            end)
           end
         end
       end
-    end
-    if F.glow_corpse and meHRP then
-      for _, c in ipairs(corpseCache) do
-        if c.pos and (meHRP.Position - c.pos).Magnitude <= F.corpse_range then
-          local m = workspace:FindFirstChild(c.name)
-          local hum = m and m:FindFirstChildOfClass("Humanoid")
-          -- re-validate: the name may be reused by a respawned live body
-          if m and m:IsA("Model") and hum and hum.Health <= 0 then
-            local key = "c_" .. m:GetDebugId()
-            setGlow(m, c.isPlayer and F.glow_corpse_c or F.corpse_ai_col, true, "c")
-            seenGlow[key] = true
-          end
-        end
-      end
-    end
 
-    -- loot --
-    if meHRP and (F.loot_cont or F.loot_drop or F.loot_quest) then
-      for _, it in ipairs(lootCache) do
-        local want = (it.kind == "drop" and F.loot_drop)
-          or (it.kind == "quest" and F.loot_quest)
-          or (F.loot_cont) -- cont + spawn
-        if want then
-          local d = (meHRP.Position - it.pos).Magnitude
-          if d <= F.loot_range then
-            nL = nL + 1
-            local sp, on = wts(it.pos)
-            if on and sp.Z > 0 then
-              local col = it.star and F.loot_hlcol or F.loot_col
-              local nm = (it.star and "★ " or "") .. it.name
-              drawText(sp.X, sp.Y, nm .. "  " .. math.floor(d + 0.5) .. "m", col, it.star and 14 or 12)
-            end
-          end
-        end
-      end
-    end
-
-    -- exits --
-    if F.exit_on and meHRP then
-      for _, e in ipairs(exitCache) do
-        local d = (meHRP.Position - e.pos).Magnitude
-        if d <= F.exit_range then
-          local sp, on = wts(e.pos)
-          if on and sp.Z > 0 then
-            drawText(sp.X, sp.Y, "EXIT  " .. math.floor(d + 0.5) .. "m", F.exit_col, 14)
-          end
-        end
-      end
-    end
-
-    -- radar --
-    if F.radar_on and meHRP then
-      local size = F.radar_size or 170
-      local pos = Vector2.new(vs.X - size - 16, vs.Y - size - 16)
-      local bg = shape("Square")
-      bg.Color = { R = 0.06, G = 0.06, B = 0.1 }; bg.Thickness = 1
-      bg.Size = Vector2.new(size, size); bg.Position = pos
-      local bd = shape("Square")
-      bd.Color = { R = 0.25, G = 0.55, B = 0.7 }; bd.Thickness = 1; bd.Filled = false
-      bd.Size = Vector2.new(size, size); bd.Position = pos
-      local fwd, right = camera.CFrame.LookVector, camera.CFrame.RightVector
-      local function dot(worldPos, col, s)
-        local rel = worldPos - meHRP.Position
-        local dx, dz = rel:Dot(right), rel:Dot(fwd)
-        if math.sqrt(dx * dx + dz * dz) > F.radar_range then return end
-        local sc = (size / 2 - 4) / F.radar_range
-        local p = shape("Square")
-        p.Color = col; p.Thickness = 1
-        p.Size = Vector2.new(s, s)
-        p.Position = Vector2.new(pos.X + size / 2 + dx * sc - s / 2, pos.Y + size / 2 + dz * sc - s / 2)
-      end
-      for _, pl in ipairs(players:GetPlayers()) do
-        if pl ~= LP then
-          local ch = pl.Character
-          local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-          local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-          if hrp and hum and hum.Health > 0 then
-            dot(hrp.Position, { R = 1, G = 0.35, B = 0.35 }, 3)
-          end
-        end
-      end
-      for _, c in ipairs(corpseCache) do
-        if c.pos then dot(c.pos, { R = 1, G = 0.6, B = 0.15 }, 2) end
-      end
-      for _, e in ipairs(exitCache) do
-        dot(e.pos, { R = 0.4, G = 0.9, B = 0.5 }, 3)
-      end
-    end
-
-    -- aim --
-    aimOn = false
-    if F.aim_on and meHRP and not (F.aim_pause and hubOpen()) then
-      local cap = math.rad(F.aim_fov or 15)
-      local best, bestScore = nil, F.aim_prio == "distance" and math.huge or cap
-      local origin = camera.CFrame.Position
-      for _, pl in ipairs(players:GetPlayers()) do
-        if pl ~= LP then
-          local ch = pl.Character
-          if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
-          local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-          if ch and hum and hum.Health > 0 then
-            local ap = aimPoint(ch, F.aim_part)
-            if ap then
-              local dir = ap - origin
-              local len = dir.Magnitude
-              if len > 1 then
-                local ang = math.acos(clamp(camera.CFrame.LookVector:Dot(dir / len), -1, 1))
-                if ang < cap and isVisible(origin, ap, ch) then
-                  local score = (F.aim_prio == "distance") and len or ang
-                  if score < bestScore then bestScore = score best = ap end
+      -- npc (traders/bosses)
+      if F.npc_on and meHRP then
+        guarded("npc", function()
+          for _, npc in ipairs(npcCache) do
+            local m = npc.model
+            if m and m.Parent and npc.hum.Health > 0 then
+              local d = (meHRP.Position - npc.hrp.Position).Magnitude
+              if d == d and d <= F.npc_range then
+                local cf, size = boxOf(m)
+                if cf and size then
+                  local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
+                  if tOn then
+                    drawText(t2.X, t2.Y - 8, npc.name .. "  " .. math.floor(d + 0.5) .. "m", F.npc_col, 12)
+                  end
+                end
+                if F.glow_npc then
+                  local key = "n_" .. m:GetDebugId()
+                  setGlow(m, F.npc_col, true, "n")
+                  seenGlow[key] = true
                 end
               end
             end
           end
-        end
+        end)
       end
-      if best then
-        if not aimLastPos or (best - aimLastPos).Magnitude > 5 then
-          aimSince = now -- fresh target: human reaction delay starts
-        end
-        aimLastPos = best
-        local hold = F.aim_hold
-        if now - aimSince >= (F.aim_delay or 0)
-          and (hold == "always"
-            or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
-            or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))) then
-          local alpha = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
-          camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha, true)
-          aimOn = true
-        end
-      else
-        aimLastPos = nil
+
+      -- corpses
+      if F.corpse_on and meHRP then
+        guarded("corpse", function()
+          for _, c in ipairs(corpseCache) do
+            if c.pos then
+              local showAI = c.isPlayer or F.corpse_ai
+              if showAI then
+                local d = (meHRP.Position - c.pos).Magnitude
+                if d == d and d <= F.corpse_range then
+                  nC = nC + 1
+                  local col = c.isPlayer and F.corpse_col or F.corpse_ai_col
+                  local sp, on = wts(c.pos + Vector3.new(0, 1, 0))
+                  if on then
+                    local tag = (c.isPlayer and "[BODY] " or "[AI] ") .. c.name
+                    drawText(sp.X, sp.Y, tag .. "  " .. math.floor(d + 0.5) .. "m", col, 13)
+                  end
+                end
+              end
+            end
+          end
+        end)
       end
-    end
+      if F.glow_corpse and meHRP then
+        guarded("corpseGlow", function()
+          for _, c in ipairs(corpseCache) do
+            if c.pos and (meHRP.Position - c.pos).Magnitude <= F.corpse_range then
+              local m = workspace:FindFirstChild(c.name)
+              local hum = m and m:FindFirstChildOfClass("Humanoid")
+              -- re-validate: the name may be reused by a respawned live body
+              if m and m:IsA("Model") and hum and hum.Health <= 0 then
+                local key = "c_" .. m:GetDebugId()
+                setGlow(m, c.isPlayer and F.glow_corpse_c or F.corpse_ai_col, true, "c")
+                seenGlow[key] = true
+              end
+            end
+          end
+        end)
+      end
 
-    -- fov circle --
-    if F.aim_circle then
-      local c = shape("Circle")
-      c.Color = { R = 0.2, G = 0.8, B = 1 }; c.Transparency = 0.5
-      c.Thickness = 1; c.NumSides = 48
-      c.Radius = math.tan(math.rad(clamp(F.aim_fov or 15, 5, 90))) * vs.Y * 0.5
-      c.Position = Vector2.new(vs.X / 2, vs.Y / 2)
-    end
-    if aimOn then
-      local dot = shape("Square")
-      dot.Color = { R = 1, G = 0.3, B = 0.3 }; dot.Thickness = 2
-      dot.Size = Vector2.new(7, 7)
-      dot.Position = Vector2.new(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
-      dot.Transparency = 0
-    end
+      -- loot
+      if meHRP and (F.loot_cont or F.loot_drop or F.loot_quest) then
+        guarded("loot", function()
+          for _, it in ipairs(lootCache) do
+            local want = (it.kind == "drop" and F.loot_drop)
+              or (it.kind == "quest" and F.loot_quest)
+              or (F.loot_cont) -- cont + spawn
+            if want and it.pos then
+              local d = (meHRP.Position - it.pos).Magnitude
+              if d == d and d <= F.loot_range then
+                nL = nL + 1
+                local sp, on = wts(it.pos)
+                if on then
+                  local col = it.star and F.loot_hlcol or F.loot_col
+                  local nm = (it.star and "* " or "") .. it.name
+                  drawText(sp.X, sp.Y, nm .. "  " .. math.floor(d + 0.5) .. "m", col, it.star and 14 or 12)
+                end
+              end
+            end
+          end
+        end)
+      end
 
-    gcGlow(seenGlow)
+      -- exits
+      if F.exit_on and meHRP then
+        guarded("exits", function()
+          for _, e in ipairs(exitCache) do
+            if e.pos then
+              local d = (meHRP.Position - e.pos).Magnitude
+              if d == d and d <= F.exit_range then
+                local sp, on = wts(e.pos)
+                if on then
+                  drawText(sp.X, sp.Y, "EXIT  " .. math.floor(d + 0.5) .. "m", F.exit_col, 14)
+                end
+              end
+            end
+          end
+        end)
+      end
 
-    if statLbl and now - statTick > 2 then
-      statTick = now
-      pcall(function()
-        statLbl.Set(("players %d · bodies %d · loot %d%s"):format(
-          nP, nC, nL, aimOn and " · LOCK" or ""))
-      end)
-    end
+      -- radar
+      if F.radar_on and meHRP then
+        guarded("radar", function()
+          local size = F.radar_size or 170
+          local pos = V2(vs.X - size - 16, vs.Y - size - 16)
+          local bg = shape("Square")
+          bg.Color = { R = 0.06, G = 0.06, B = 0.1 }; bg.Thickness = 1
+          bg.Size = V2(size, size); bg.Position = V2(pos.X, pos.Y)
+          local bd = shape("Square")
+          bd.Color = { R = 0.25, G = 0.55, B = 0.7 }; bd.Thickness = 1; bd.Filled = false
+          bd.Size = V2(size, size); bd.Position = V2(pos.X, pos.Y)
+          local fwd, right = camera.CFrame.LookVector, camera.CFrame.RightVector
+          local function dot(worldPos, col, s)
+            local rel = worldPos - meHRP.Position
+            local dx, dz = rel:Dot(right), rel:Dot(fwd)
+            if dx ~= dx or dz ~= dz then return end
+            if math.sqrt(dx * dx + dz * dz) > F.radar_range then return end
+            local sc = (size / 2 - 4) / F.radar_range
+            local p = shape("Square")
+            p.Color = col; p.Thickness = 1
+            p.Size = V2(s, s)
+            p.Position = V2(pos.X + size / 2 + dx * sc - s / 2, pos.Y + size / 2 + dz * sc - s / 2)
+          end
+          for _, pl in ipairs(players:GetPlayers()) do
+            if pl ~= LP then
+              local ch = pl.Character
+              local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+              local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+              if hrp and hum and hum.Health > 0 then
+                dot(hrp.Position, { R = 1, G = 0.35, B = 0.35 }, 3)
+              end
+            end
+          end
+          for _, c in ipairs(corpseCache) do
+            if c.pos then dot(c.pos, { R = 1, G = 0.6, B = 0.15 }, 2) end
+          end
+          for _, e in ipairs(exitCache) do
+            if e.pos then dot(e.pos, { R = 0.4, G = 0.9, B = 0.5 }, 3) end
+          end
+        end)
+      end
+
+      -- aim
+      aimOn = false
+      if F.aim_on and meHRP and not (F.aim_pause and hubOpen()) then
+        guarded("aim", function()
+          local cap = math.rad(F.aim_fov or 15)
+          local best, bestScore = nil, F.aim_prio == "distance" and math.huge or cap
+          local origin = camera.CFrame.Position
+          for _, pl in ipairs(players:GetPlayers()) do
+            if pl ~= LP then
+              local ch = pl.Character
+              if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
+              local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+              if ch and hum and hum.Health > 0 then
+                local ap = aimPoint(ch, F.aim_part)
+                if ap then
+                  local dir = ap - origin
+                  local len = dir.Magnitude
+                  if len == len and len > 1 then
+                    local ang = math.acos(clamp(camera.CFrame.LookVector:Dot(dir / len), -1, 1))
+                    if ang == ang and ang < cap and isVisible(origin, ap, ch) then
+                      local score = (F.aim_prio == "distance") and len or ang
+                      if score < bestScore then bestScore = score best = ap end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          if best then
+            if not aimLastPos or (best - aimLastPos).Magnitude > 5 then
+              aimSince = now -- fresh target: human reaction delay starts
+            end
+            aimLastPos = best
+            local hold = F.aim_hold
+            if now - aimSince >= (F.aim_delay or 0)
+              and (hold == "always"
+                or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
+                or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))) then
+              local alpha = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
+              camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha, true)
+              aimOn = true
+            end
+          else
+            aimLastPos = nil
+          end
+        end)
+      end
+
+      -- fov circle
+      if F.aim_circle then
+        local c = shape("Circle")
+        c.Color = { R = 0.2, G = 0.8, B = 1 }; c.Transparency = 0.5
+        c.Thickness = 1; c.NumSides = 48
+        c.Radius = math.abs(fin(math.tan(math.rad(clamp(F.aim_fov or 15, 5, 90))) * vs.Y * 0.5, 10))
+        c.Position = V2(vs.X / 2, vs.Y / 2)
+      end
+      if aimOn then
+        local dotm = shape("Square")
+        dotm.Color = { R = 1, G = 0.3, B = 0.3 }; dotm.Thickness = 2
+        dotm.Size = V2(7, 7)
+        dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
+        dotm.Transparency = 0
+      end
+
+      gcGlow(seenGlow)
+
+      if statLbl and now - statTick > 2 then
+        statTick = now
+        pcall(function()
+          statLbl.Set(("players %d - bodies %d - loot %d%s"):format(
+            nP, nC, nL, aimOn and " - LOCK" or ""))
+          local parts = { ("loop %dfps"):format(dbg.fps) }
+          for _, sec in ipairs({ "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim" }) do
+            if dbg.err[sec] then
+              table.insert(parts, sec .. "!" .. dbg.err[sec])
+            end
+          end
+          if dbg.last ~= "" then table.insert(parts, dbg.last) end
+          dbgLbl.Set(table.concat(parts, " - "))
+        end)
+      end
     end)
   end))
 
@@ -716,9 +770,10 @@ return function(api)
   flagSlider(wSec, "Radar size", "radar_size", 100, 320, { suf = "px" })
 
   local aboutSec = Tab:Section({ Name = "About" })
-  aboutSec:Label("PROJECT DELTA · hub module (safe build)")
+  aboutSec:Label("PROJECT DELTA - hub module (safe build)")
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
-  statLbl = aboutSec:Label("players 0 · bodies 0 · loot 0")
+  statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
+  local dbgLbl = aboutSec:Label("loop - fps")
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
   end })
@@ -748,6 +803,6 @@ return function(api)
     getgenv().__HUMA_PLACE = hub -- generic contract: hub unloads the place module
   end) end
 
-  Notify("Delta", "Loaded — eyes only, play sane", "ok")
+  Notify("Delta", "Loaded - eyes only, play sane", "ok")
   print("[huma-delta] place module loaded")
 end
