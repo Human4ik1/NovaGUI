@@ -23,7 +23,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.4-fix"
+  local MODULE_VERSION = "2.5-fix"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -47,6 +47,7 @@ return function(api)
     esp_thick = 2, esp_range = 4000,
     esp_enemy = Color3.fromRGB(255, 90, 90),
     aim_on = false, aim_part = "Head", aim_fov = 15, aim_smooth = 65,
+    aim_range = 1200,
     aim_hold = "right", aim_prio = "closest", aim_vis = true,
     aim_circle = true, aim_pause = true, aim_delay = 0.1,
     glow_on = false, glow_npc = false, glow_corpse = false, glow_top = true,
@@ -79,6 +80,7 @@ return function(api)
     HAS_DRAWING = ok == true
   end
 
+  local moduleDead = false -- set by unloadModule; stops the background scan
   local CONNS = {}
   local function reg(c) table.insert(CONNS, c) return c end
   local unloadModule -- fwd (About button runs at click-time)
@@ -188,10 +190,17 @@ return function(api)
     m = m or 80
     return x0 + w > -m and x0 < vs.X + m and y0 + h > -m and y0 < vs.Y + m
   end
+  -- cheap viewport cull for single-point labels: drawing text thousands of
+  -- pixels off-screen still costs a draw call in most executors
+  local function onScreenPt(p, vs, m)
+    m = m or 64
+    return p.X > -m and p.X < vs.X + m and p.Y > -m and p.Y < vs.Y + m
+  end
+  local frameMe -- local character, resolved once per frame
   local function isVisible(from, to, ignoreChar, force)
     if not force and not F.aim_vis then return true end
     local ignore = {}
-    local me = myChar()
+    local me = frameMe or myChar()
     if me then ignore[#ignore + 1] = me end
     if ignoreChar then ignore[#ignore + 1] = ignoreChar end
     ignore[#ignore + 1] = camera
@@ -208,9 +217,14 @@ return function(api)
     local hol = model:FindFirstChild("Holstered")
     if hol then
       for _, o in ipairs(hol:GetChildren()) do
-        local ok, v = pcall(function() return o.Value end)
-        if ok and v ~= nil and tostring(v) ~= "" and tostring(v) ~= "nil" then
-          return tostring(v)
+        -- only *Value objects carry the item name; anything else made the
+        -- old code rely on a pcall failing to skip it
+        if o:IsA("ValueBase") then
+          local ok, v = pcall(function() return o.Value end)
+          if ok and v ~= nil then
+            local t = tostring(v)
+            if t ~= "" and t ~= "nil" and t ~= "false" then return t end
+          end
         end
       end
     end
@@ -230,7 +244,6 @@ return function(api)
   -- Cached slow scans (loot / corpses / npc / exits) — 2s timer
   -- --------------------------------------------------------------------------
   local lootCache, corpseCache, npcCache, exitCache = {}, {}, {}, {}
-  local scanTick = 0
   local syncLabelMaps -- fwd: defined below scanWorld, runs on ticks
   local function hlKeys()
     local out = {}
@@ -240,24 +253,34 @@ return function(api)
     end
     return out
   end
+  -- Runs on a background task, NOT inside RenderStepped: GetDescendants()
+  -- over Containers can be tens of thousands of nodes and used to hitch the
+  -- frame every 2s. It also builds into temp tables and swaps them in at the
+  -- end, so a yield mid-scan never leaves the render loop with empty caches.
+  local SCAN_BUDGET = 1500 -- nodes between yields
   local function scanWorld()
-    lootCache, corpseCache, npcCache, exitCache = {}, {}, {}, {}
+    local budget = SCAN_BUDGET
+    local function step()
+      budget = budget - 1
+      if budget <= 0 then budget = SCAN_BUDGET; task.wait() end
+    end
+    local loot, corpses, npcs, exits = {}, {}, {}, {}
     local keys = hlKeys()
-    local function lootKindOf(model)
+    local function lootKindOf(model, root)
       local p = model
       while p and p ~= workspace do
-        local n = p.Name
-        if n == "DroppedItems" then return "drop" end
-        if n == "Containers" then return "cont" end
-        if n == "QuestItems" then return "quest" end
-        if n == "LootSpawns" then return "spawn" end
+        local nm = p.Name
+        if nm == "DroppedItems" then return "drop" end
+        if nm == "Containers" then return "cont" end
+        if nm == "QuestItems" then return "quest" end
+        if nm == "LootSpawns" then return "spawn" end
         p = p.Parent
       end
       return nil
     end
     local roots = {}
-    for _, n in ipairs({ "Containers", "DroppedItems", "QuestItems" }) do
-      local f = workspace:FindFirstChild(n)
+    for _, nm in ipairs({ "Containers", "DroppedItems", "QuestItems" }) do
+      local f = workspace:FindFirstChild(nm)
       if f then table.insert(roots, f) end
     end
     local nc = workspace:FindFirstChild("NoCollision")
@@ -266,20 +289,36 @@ return function(api)
     for _, root in ipairs(roots) do
       local ok, desc = pcall(function() return root:GetDescendants() end)
       if ok then
+        -- Only the OUTERMOST model of each item is labelled. GetDescendants
+        -- returns parents before children, so a taken-ancestor test is
+        -- enough; without it a crate with sub-models drew 5 stacked labels.
+        local taken = {}
         for _, v in ipairs(desc) do
+          step()
           if v:IsA("Model") then
-            local cf, size = boxOf(v)
-            if cf and size and size.Magnitude > 0.5 then
-              local kind = lootKindOf(v) or "drop"
-              local nm = v.Name
-              local star = false
-              if F.loot_hl then
-                local ln = string.lower(nm)
-                for _, k in ipairs(keys) do
-                  if string.find(ln, k, 1, true) then star = true break end
+            local anc, dup = v.Parent, false
+            while anc and anc ~= root do
+              if taken[anc] then dup = true break end
+              anc = anc.Parent
+            end
+            if not dup then
+              local cf, size = boxOf(v)
+              if cf and size and size.Magnitude > 0.5 then
+                taken[v] = true
+                local nm = v.Name
+                local star = false
+                if F.loot_hl then
+                  local ln = string.lower(nm)
+                  for _, k in ipairs(keys) do
+                    if string.find(ln, k, 1, true) then star = true break end
+                  end
                 end
+                table.insert(loot, {
+                  pos = cf.Position, name = nm,
+                  kind = lootKindOf(v, root) or "drop",
+                  star = star, m = v,
+                })
               end
-              table.insert(lootCache, { pos = cf.Position, name = nm, kind = kind, star = star, m = v })
             end
           end
         end
@@ -290,22 +329,33 @@ return function(api)
     for _, pl in ipairs(players:GetPlayers()) do
       local ch = pl.Character
       if ch then liveChars[ch] = true end
+      local alt = workspace:FindFirstChild(pl.Name)
+      if alt then liveChars[alt] = true end
     end
     for _, v in ipairs(workspace:GetChildren()) do
+      step()
       if v:IsA("Model") then
         local hum = v:FindFirstChildOfClass("Humanoid")
         if hum then
           if hum.Health <= 0 then
             local cf = select(1, boxOf(v))
-            table.insert(corpseCache, {
-              pos = cf and cf.Position or nil,
+            -- keep a root part: ragdolls slide after death and a position
+            -- snapshot taken at scan time goes stale for up to 2 seconds
+            local rootPart = v.PrimaryPart
+              or v:FindFirstChild("HumanoidRootPart")
+              or v:FindFirstChild("UpperTorso")
+              or v:FindFirstChild("Torso")
+              or v:FindFirstChild("Head")
+            table.insert(corpses, {
+              pos = cf and cf.Position or (rootPart and rootPart.Position) or nil,
+              root = rootPart,
               name = v.Name, isPlayer = isPlayerModel(v), m = v,
             })
           elseif not liveChars[v] and not isPlayerModel(v) then
             -- NPC trader/boss (has HP, nobody's character)
-            local hrp = v:FindFirstChild("HumanoidRootPart")
+            local hrp = v:FindFirstChild("HumanoidRootPart") or v.PrimaryPart
             if hrp then
-              table.insert(npcCache, { model = v, hrp = hrp, hum = hum, name = v.Name })
+              table.insert(npcs, { model = v, hrp = hrp, hum = hum, name = v.Name })
             end
           end
         end
@@ -313,12 +363,17 @@ return function(api)
     end
     local ex = nc and nc:FindFirstChild("ExitLocations")
     if ex then
-      for _, v in ipairs(ex:GetChildren()) do
+      -- descendants, not children: exits are sometimes wrapped in a Model
+      local ok, desc = pcall(function() return ex:GetDescendants() end)
+      for _, v in ipairs(ok and desc or {}) do
+        step()
         if v:IsA("BasePart") then
-          table.insert(exitCache, { pos = v.Position, name = v.Name, part = v })
+          table.insert(exits, { pos = v.Position, name = v.Name, part = v })
         end
       end
     end
+    if moduleDead then return end
+    lootCache, corpseCache, npcCache, exitCache = loot, corpses, npcs, exits
     syncLabelMaps()
   end
 
@@ -388,6 +443,11 @@ return function(api)
   -- Glow
   -- --------------------------------------------------------------------------
   local glowMap = {}
+  -- Roblox stops rendering Highlights past ~31 live instances: past the cap
+  -- new ones silently do nothing, which looks exactly like a broken glow.
+  -- Budget them per frame so the closest targets always get one.
+  local GLOW_CAP = 24
+  local glowUsed = 0
   local function setGlow(model, col, on, tag)
     if not model or not model.Parent then return end
     local key = tostring(tag) .. "_" .. model:GetDebugId()
@@ -400,6 +460,7 @@ return function(api)
     if prev and prev.Parent then
       -- refresh live props so the Through-walls / colour toggles apply to
       -- highlights that already exist (they used to be frozen at creation)
+      glowUsed = glowUsed + 1
       pcall(function()
         if prev.FillColor ~= col then prev.FillColor = col end
         prev.DepthMode = F.glow_top and Enum.HighlightDepthMode.AlwaysOnTop
@@ -407,6 +468,8 @@ return function(api)
       end)
       return
     end
+    if glowUsed >= GLOW_CAP then return end
+    glowUsed = glowUsed + 1
     local ok, hl = pcall(function()
       local h = Instance.new("Highlight")
       h.Name = "BodyFX"
@@ -512,7 +575,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Aim state
   -- --------------------------------------------------------------------------
-  local aimOn, aimSince, aimLastPos = false, 0, nil
+  local aimOn, aimSince, aimTarget = false, 0, nil
   local function aimPoint(model, part)
     local inst = (part == "Head" and model:FindFirstChild("Head"))
       or (part == "UpperTorso" and model:FindFirstChild("UpperTorso"))
@@ -549,15 +612,12 @@ return function(api)
         dbg.fps = math.floor(dbg.frames / math.max(now - dbg.fpsT, 0.01) + 0.5)
         dbg.frames, dbg.fpsT = 0, now
       end
-      if now - scanTick > 2 then
-        scanTick = now
-        pcall(scanWorld)
-      end
-
       local me = myChar()
+      frameMe = me
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
       local seenGlow = {}
+      glowUsed = 0
       nP, nC, nL = 0, 0, 0
 
       -- players (persistent rigs: props updated, hidden when invalid)
@@ -565,7 +625,10 @@ return function(api)
         for _, pl in ipairs(players:GetPlayers()) do
           if pl ~= LP then
             guarded("players", function()
-              local e = rigOf(pl)
+              -- rigs are 14 Drawing objects each: build one only when the
+              -- player actually reaches the drawing stage, not for every
+              -- name on the player list
+              local e = pesc[pl]
               local ch = pl.Character
               if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
               local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -582,6 +645,7 @@ return function(api)
                 seenGlow[key] = true
               end
               if not F.esp_on then hideRig(e) return end
+              e = rigOf(pl)
               local cf, size = boxOf(ch)
               if not (cf and size) then hideRig(e) return end
               local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
@@ -711,7 +775,7 @@ return function(api)
                 local cf, size = boxOf(m)
                 if cf and size then
                   local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
-                  if tOn and L then
+                  if tOn and L and onScreenPt(t2, vs) then
                     L.Text = npc.name .. "  " .. math.floor(d + 0.5) .. "m"
                     L.Color = F.npc_col
                     L.Position = V2(t2.X, t2.Y - 8)
@@ -739,15 +803,19 @@ return function(api)
           for _, c in ipairs(corpseCache) do
             local L = c.lbl
             if L then L.Visible = false end
-            if c.pos and L then
+            -- ragdolls keep sliding after death: follow the root part when
+            -- it still exists instead of the scan-time snapshot
+            local cpos = c.pos
+            if c.root and c.root.Parent then cpos = c.root.Position end
+            if cpos and L then
               local showAI = c.isPlayer or F.corpse_ai
               if showAI then
-                local d = (meHRP.Position - c.pos).Magnitude
+                local d = (meHRP.Position - cpos).Magnitude
                 if d == d and d <= F.corpse_range then
                   nC = nC + 1
                   local col = c.isPlayer and F.corpse_col or F.corpse_ai_col
-                  local sp, on = wts(c.pos + Vector3.new(0, 1, 0))
-                  if on then
+                  local sp, on = wts(cpos + Vector3.new(0, 1, 0))
+                  if on and onScreenPt(sp, vs) then
                     local tag = (c.isPlayer and "[BODY] " or "[AI] ") .. c.name
                     L.Text = tag .. "  " .. math.floor(d + 0.5) .. "m"
                     L.Color = col
@@ -767,7 +835,9 @@ return function(api)
       if F.glow_corpse and meHRP then
         guarded("corpseGlow", function()
           for _, c in ipairs(corpseCache) do
-            if c.pos and (meHRP.Position - c.pos).Magnitude <= F.corpse_range then
+            local cpos = c.pos
+            if c.root and c.root.Parent then cpos = c.root.Position end
+            if cpos and (meHRP.Position - cpos).Magnitude <= F.corpse_range then
               -- use the cached instance: FindFirstChild(name) could grab a
               -- respawned LIVE body that reused the same name
               local m = c.m
@@ -799,7 +869,7 @@ return function(api)
               if d == d and d <= F.loot_range then
                 nL = nL + 1
                 local sp, on = wts(it.pos)
-                if on then
+                if on and onScreenPt(sp, vs) then
                   local col = it.star and F.loot_hlcol or F.loot_col
                   local nm = (it.star and "* " or "") .. it.name
                   L.Text = nm .. "  " .. math.floor(d + 0.5) .. "m"
@@ -828,7 +898,7 @@ return function(api)
               local d = (meHRP.Position - e.pos).Magnitude
               if d == d and d <= F.exit_range then
                 local sp, on = wts(e.pos)
-                if on then
+                if on and onScreenPt(sp, vs) then
                   L.Text = "EXIT " .. tostring(e.name) .. "  " .. math.floor(d + 0.5) .. "m"
                   L.Color = F.exit_col
                   L.Position = V2(sp.X, sp.Y)
@@ -909,8 +979,11 @@ return function(api)
       if F.aim_on and meHRP and not (F.aim_pause and hubOpen()) then
         guarded("aim", function()
           local cap = math.rad(F.aim_fov or 15)
-          local best, bestScore = nil, F.aim_prio == "distance" and math.huge or cap
+          local maxR = F.aim_range or 1200
+          local best, bestPl = nil, nil
+          local bestScore = (F.aim_prio == "distance") and math.huge or cap
           local origin = camera.CFrame.Position
+          local look = camera.CFrame.LookVector
           for _, pl in ipairs(players:GetPlayers()) do
             if pl ~= LP then
               local ch = pl.Character
@@ -921,11 +994,15 @@ return function(api)
                 if ap then
                   local dir = ap - origin
                   local len = dir.Magnitude
-                  if len == len and len > 1 then
-                    local ang = math.acos(clamp(camera.CFrame.LookVector:Dot(dir / len), -1, 1))
+                  -- hard range cap: locking onto someone across the whole
+                  -- map is the single most obvious thing on a recording
+                  if len == len and len > 1 and len <= maxR then
+                    local ang = math.acos(clamp(look:Dot(dir / len), -1, 1))
                     if ang == ang and ang < cap and isVisible(origin, ap, ch) then
                       local score = (F.aim_prio == "distance") and len or ang
-                      if score < bestScore then bestScore = score best = ap end
+                      if score < bestScore then
+                        bestScore = score; best = ap; bestPl = pl
+                      end
                     end
                   end
                 end
@@ -933,21 +1010,28 @@ return function(api)
             end
           end
           if best then
-            if not aimLastPos or (best - aimLastPos).Magnitude > 5 then
-              aimSince = now -- fresh target: human reaction delay starts
+            -- the delay is per TARGET, not per position. Tracking a position
+            -- meant a running target kept re-arming the delay and the lock
+            -- stuttered instead of following.
+            if bestPl ~= aimTarget then
+              aimTarget = bestPl
+              aimSince = now
             end
-            aimLastPos = best
             local hold = F.aim_hold
             if now - aimSince >= (F.aim_delay or 0)
               and (hold == "always"
                 or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
                 or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))) then
-              local alpha = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
+              -- frame-rate independent: the same Smoothness used to move
+              -- twice as fast at 120fps as it did at 60
+              local base = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
+              local step = clamp(math.max(dt or (1 / 60), 1 / 480) * 60, 0.05, 4)
+              local alpha = clamp(1 - (1 - base) ^ step, 0.01, 1)
               camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha)
               aimOn = true
             end
           else
-            aimLastPos = nil
+            aimTarget = nil
           end
         end)
       end
@@ -991,7 +1075,7 @@ return function(api)
           statLbl.Set(("players %d - bodies %d - loot %d%s"):format(
             nP, nC, nL, aimOn and " - LOCK" or ""))
           local parts = { ("loop %dfps"):format(dbg.fps) }
-          for _, sec in ipairs({ "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim", "hud" }) do
+          for _, sec in ipairs({ "scan", "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim", "hud" }) do
             if dbg.err[sec] then
               table.insert(parts, sec .. "!" .. dbg.err[sec])
             end
@@ -1049,6 +1133,7 @@ return function(api)
   flagToggle(aSec, "Aim lock", "aim_on")
   flagDropdown(aSec, "Aim part", "aim_part", { "Head", "UpperTorso", "HumanoidRootPart" })
   flagSlider(aSec, "FOV", "aim_fov", 5, 45)
+  flagSlider(aSec, "Max range", "aim_range", 100, 3000, { suf = "m", tip = "Never lock past this distance" })
   flagSlider(aSec, "Smoothness", "aim_smooth", 1, 100, { tip = "Higher = slower, more human" })
   flagSlider(aSec, "Target delay", "aim_delay", 0, 0.5, { dec = 2, suf = "s", tip = "Reaction delay on new targets" })
   flagDropdown(aSec, "Trigger", "aim_hold", { "right", "left", "always" })
@@ -1151,6 +1236,8 @@ return function(api)
   -- Unload + boot
   -- --------------------------------------------------------------------------
   unloadModule = function()
+    if moduleDead then return end -- hub + About button can both call this
+    moduleDead = true
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     freeTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
@@ -1171,7 +1258,15 @@ return function(api)
     Notify("Delta", "Module unloaded", "info")
   end
 
-  scanWorld()
+  -- background scanner: first pass immediately, then every 2s
+  task.spawn(function()
+    while not moduleDead do
+      guarded("scan", scanWorld)
+      local t = 0
+      while t < 2 and not moduleDead do t = t + task.wait(0.25) end
+    end
+  end)
+
   local hub = { Unload = unloadModule }
   if getgenv then pcall(function()
     getgenv().__HUMA_DELTA = hub
@@ -1204,6 +1299,7 @@ return function(api)
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
           drawing = HAS_DRAWING,
+          glowUsed = glowUsed, glowCap = GLOW_CAP,
           objs = { rigs = rigs, labels = labels },
           shown = { box = visBox, name = visName, dist = visDist,
                     weapon = visWpn, trace = visTrace },
