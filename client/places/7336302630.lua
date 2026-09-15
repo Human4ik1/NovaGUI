@@ -1298,6 +1298,37 @@ return function(api)
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
 
+  -- Sub-menu: one column of group buttons, one visible group at a time.
+  -- Pure Nova API: groups are normal sections, hidden via .Instance.
+  local groupMap = {}
+  local menuSec = Tab:Section({ Name = "Delta" })
+  menuSec:Paragraph("Pick a section. Everything starts OFF.")
+  local function showGroup(name)
+    menuSec.Instance.Visible = (name == nil)
+    for gn, secs in pairs(groupMap) do
+      local vis = (gn == name)
+      for _, s in ipairs(secs) do
+        if s.Instance then s.Instance.Visible = vis end
+      end
+    end
+  end
+  local menuDefs = {
+    { "Players", "ESP boxes, names, weapons on players" },
+    { "Aim", "Camera lock, FOV, trigger" },
+    { "Glow", "Chams on players, loot, bodies" },
+    { "Loot", "Crates, drops, keywords, glow" },
+    { "Bodies", "Player + AI corpses" },
+    { "Bots", "Hostile AI ESP, aim, glow" },
+    { "World", "NPC, exits, radar, daylight" },
+    { "About", "Status, debug, unload" },
+  }
+  for _, d in ipairs(menuDefs) do
+    local gname, gdesc = d[1], d[2]
+    menuSec:Button({ Name = gname, Desc = gdesc, Callback = function()
+      showGroup(gname)
+    end })
+  end
+
   local pSec = Tab:Section({ Name = "Players", Collapsed = true })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
   if not HAS_DRAWING then
@@ -1442,6 +1473,24 @@ return function(api)
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
   end })
+
+  -- register groups + Back buttons, then land on the menu
+  groupMap.Players = { pSec }
+  groupMap.Aim = { aSec }
+  groupMap.Glow = { gSec }
+  groupMap.Loot = { lSec }
+  groupMap.Bodies = { bSec }
+  groupMap.Bots = { botSec }
+  groupMap.World = { wSec }
+  groupMap.About = { aboutSec }
+  for gname, secs in pairs(groupMap) do
+    for _, s in ipairs(secs) do
+      s:Button({ Name = "< Menu", Variant = "ghost", Callback = function()
+        showGroup(nil)
+      end })
+    end
+  end
+  showGroup(nil)
 
   -- --------------------------------------------------------------------------
   -- Unload + boot
