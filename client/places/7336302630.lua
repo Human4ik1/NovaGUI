@@ -127,6 +127,7 @@ return function(api)
   local function V2(x, y) return Vector2.new(fin(x), fin(y)) end
   -- per-section error counters (see About debug line): silence with telemetry
   local dbg = { fps = 0, frames = 0, fpsT = 0, err = {}, last = "" }
+  local drawn = { box = 0, txt = 0 } -- lifetime draw counters (debug)
   local function guarded(sec, fn)
     local ok, e = pcall(fn)
     if not ok then
@@ -142,6 +143,7 @@ return function(api)
   local function drawBox2D(x0, y0, w, h, col, thick)
     x0, y0, w, h = fin(x0), fin(y0), math.abs(fin(w)), math.abs(fin(h))
     if w < 1 or h < 1 then return end
+    drawn.box = drawn.box + 1
     -- Drawing Transparency: 0 = opaque, 1 = invisible
     local tl = shape("Line"); tl.Color = col; tl.Thickness = thick; tl.Transparency = 0
     local tr = shape("Line"); tr.Color = col; tr.Thickness = thick; tr.Transparency = 0
@@ -153,6 +155,7 @@ return function(api)
     br.From = V2(x0, y0 + h); br.To = V2(x0 + w, y0 + h)
   end
   local function drawText(cx, y, str, col, size)
+    drawn.txt = drawn.txt + 1
     local t = shape("Text")
     t.Color = col; t.Size = size or 13; t.Center = true; t.Outline = true; t.Transparency = 0
     t.Text = tostring(str):sub(1, 80)
@@ -811,6 +814,23 @@ return function(api)
   if getgenv then pcall(function()
     getgenv().__HUMA_DELTA = hub
     getgenv().__HUMA_PLACE = hub -- generic contract: hub unloads the place module
+    -- live debug snapshot (flags, errors, counters) for diagnosis
+    getgenv().__HUMA_DELTA_DBG = function()
+      local ok, snap = pcall(function()
+        return {
+          fps = dbg.fps, err = dbg.err, last = dbg.last,
+          counts = { nP = nP, nC = nC, nL = nL },
+          drawn = { box = drawn.box, txt = drawn.txt },
+          flags = {
+            box = F.esp_box, hp = F.esp_health, tracer = F.esp_tracer,
+            name = F.esp_name, dist = F.esp_dist, weapon = F.esp_weapon,
+            glow = F.glow_on, range = F.esp_range, thick = F.esp_thick,
+          },
+        }
+      end)
+      if ok then return snap end
+      return { error = tostring(snap) }
+    end
   end) end
 
   Notify("Delta", "Loaded - eyes only, play sane", "ok")
