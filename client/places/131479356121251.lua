@@ -44,6 +44,8 @@ return function(api)
     conns = {}, daubs = 0, claims = 0, calls = 0,
     claimTries = {}, claimLast = {}, lastCall = 0, enabledAt = 0,
     seen = {}, -- union of every number observed since enable (event+panel)
+    sentSig = {}, -- board signature at last claim attempt per card
+    lastNumForced = false, -- last-number failsafe fires once per round
     rivalClaimed = false, stagePattern = nil, holdMsg = "",
     patCache = nil, patTick = 0,
   }
@@ -260,7 +262,10 @@ return function(api)
   -- Claim with a retry budget (max 8 tries, ≥3s apart). Budget resets every
   -- round AND every stage (new figure). `force` bypasses the caps — used for
   -- rival-claim and last-number failsafes (better something than nothing).
-  local function tryClaim(idx, force)
+  -- `sig` records the exact board claimed, so the same stale board is never
+  -- re-claimed (new stages keep old stamps — without this the bot spams
+  -- claims for shapes that already lost/won).
+  local function tryClaim(idx, force, sig)
     local now = os.clock()
     local tryNo
     if not force then
@@ -274,6 +279,7 @@ return function(api)
       S.claimLast[idx] = now
       tryNo = "FORCE"
     end
+    if sig then S.sentSig[idx] = sig end
     S.claims = S.claims + 1
     -- primary path: the game's own Bingo button (its handler picks the
     -- winning card itself — no arg guessing). Fallback: direct ClaimBingo.
@@ -297,13 +303,22 @@ return function(api)
   -- except two failsafes that force an instant claim of whatever wins:
   --   1) rivalClaimed — someone else just claimed (RoundState ClaimWindow);
   --   2) lastNumber  — 74+ of 75 numbers are out, the game is about to end.
+  local function gridSig(grid)
+    local ks = {}
+    for k, v in pairs(grid) do
+      if v.marked then table.insert(ks, k) end
+    end
+    table.sort(ks)
+    return table.concat(ks, ",")
+  end
+
   local function claimPass(force)
     if not S.bingo then return end
     local fresh = cards()
     local winners, total = {}, 0
     for idx, grid in pairs(fresh) do
       total = total + 1
-      if hasBingo(grid) then table.insert(winners, idx) end
+      if hasBingo(grid) then table.insert(winners, { idx = idx, sig = gridSig(grid) }) end
     end
     if #winners == 0 then
       S.holdMsg = ""
@@ -324,11 +339,19 @@ return function(api)
     end
     local why = "single"
     local forceClaim = force == true
-    if S.rivalClaimed then why, forceClaim = "RIVAL", true end
-    if lastNumber then why, forceClaim = "LAST-NUMBER", true end
+    -- last-number failsafe fires once (edge); afterwards normal sig-gating
+    if lastNumber and not S.lastNumForced then
+      S.lastNumForced = true
+      forceClaim = true
+    end
+    if lastNumber then why = "LAST-NUMBER" end
+    if S.rivalClaimed then why = "RIVAL" end
     if allWin then why = "ALL-WIN" end
-    for _, idx in ipairs(winners) do
-      tryClaim(idx, forceClaim or nil)
+    for _, w in ipairs(winners) do
+      -- only fresh boards: skip what this exact board already claimed
+      if forceClaim or S.sentSig[w.idx] ~= w.sig then
+        tryClaim(w.idx, forceClaim or nil, w.sig)
+      end
     end
     setStatus(("claiming %d/%d (%s)"):format(#winners, total, why))
   end
@@ -442,6 +465,8 @@ return function(api)
     S.claimTries = {}
     S.claimLast = {}
     S.seen = {}
+    S.sentSig = {}
+    S.lastNumForced = false
     S.rivalClaimed = false
     S.holdMsg = ""
     S.patCache = nil
@@ -466,6 +491,9 @@ return function(api)
           S.claimLast = {}
           S.rivalClaimed = false
           S.holdMsg = ""
+          -- NOTE: sentSig is NOT reset here on purpose: stamps persist
+          -- across stages, and re-claiming the same stale board is exactly
+          -- the stage-2 spam we killed. Only genuinely new marks re-arm.
           setStatus("stage figure: " .. S.stagePattern)
         end
       elseif phase == "ClaimWindow" then
