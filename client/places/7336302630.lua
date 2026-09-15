@@ -55,6 +55,12 @@ return function(api)
     glow_enemy = Color3.fromRGB(255, 90, 90),
     glow_npc_c = Color3.fromRGB(150, 160, 170),
     glow_corpse_c = Color3.fromRGB(255, 150, 40),
+    glow_loot = true,
+    glow_cont = Color3.fromRGB(255, 170, 60),
+    glow_drop = Color3.fromRGB(120, 220, 255),
+    glow_quest = Color3.fromRGB(190, 120, 255),
+    glow_star = Color3.fromRGB(255, 210, 90),
+    glow_lootcap = 30,
     loot_cont = true, loot_drop = true, loot_quest = true,
     loot_hl = true, loot_keys = "card,key,defib,ledx,bitcoin,gpu,military, thermal, red, violet, gold",
     loot_col = Color3.fromRGB(120, 220, 255),
@@ -617,7 +623,7 @@ return function(api)
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
       local seenGlow = {}
-      glowUsed = 0
+      local glowBudget = F.glow_lootcap or 30 -- loot highlights cap/frame
       nP, nC, nL = 0, 0, 0
 
       -- players (persistent rigs: props updated, hidden when invalid)
@@ -877,6 +883,15 @@ return function(api)
                   L.Size = it.star and 14 or 12
                   L.Position = V2(sp.X, sp.Y)
                   L.Visible = true
+                end
+                if F.glow_loot and glowBudget > 0 and it.m and it.m.Parent then
+                  local gc = it.star and F.glow_star
+                    or (it.kind == "drop" and F.glow_drop
+                      or (it.kind == "quest" and F.glow_quest or F.glow_cont))
+                  local key = "l_" .. it.m:GetDebugId()
+                  setGlow(it.m, gc, true, "l")
+                  seenGlow[key] = true
+                  glowBudget = glowBudget - 1
                 end
               end
             end
@@ -1155,6 +1170,12 @@ return function(api)
   flagColor(gSec, "Player glow", "glow_enemy")
   flagColor(gSec, "NPC glow", "glow_npc_c")
   flagColor(gSec, "Corpse glow", "glow_corpse_c")
+  flagToggle(gSec, "Loot glow", "glow_loot",
+    "Highlight crates, dropped and quest items (capped per frame)")
+  flagColor(gSec, "Crate glow", "glow_cont")
+  flagColor(gSec, "Dropped glow", "glow_drop")
+  flagColor(gSec, "Quest glow", "glow_quest")
+  flagColor(gSec, "Star glow", "glow_star")
 
   local lSec = Tab:Section({ Name = "Loot" })
   lSec:Paragraph("Containers, floor drops, quest items. Starred = keyword match.")
