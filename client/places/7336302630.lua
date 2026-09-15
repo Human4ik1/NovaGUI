@@ -23,7 +23,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.1-rig"
+  local MODULE_VERSION = "2.2-rig"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -88,6 +88,9 @@ return function(api)
   local transient = {}
   local function shape(typ)
     local s = Drawing.new(typ)
+    -- Drawing API: Transparency is OPACITY (1 = solid, 0 = invisible).
+    -- Every object starts solid; nothing here may set it to 0.
+    pcall(function() s.Transparency = 1 end)
     s.Visible = true
     return s
   end
@@ -285,7 +288,8 @@ return function(api)
   local lootMap, corpseMap, npcMap, exitMap = {}, {}, {}, {}
   local function mkLabel(size)
     local t = shape("Text")
-    t.Center = true; t.Outline = true; t.Transparency = 0
+    t.Center = true; t.Outline = true; t.Transparency = 1
+    pcall(function() t.Font = 2; t.ZIndex = 3 end)
     t.Size = size or 12; t.Visible = false
     return t
   end
@@ -389,6 +393,8 @@ return function(api)
     local s = shape("Square")
     pcall(function()
       s.Filled = fill == true
+      s.Transparency = 1
+      s.ZIndex = 2
       s.Visible = false
     end)
     return s
@@ -398,7 +404,9 @@ return function(api)
     pcall(function()
       t.Center = true
       t.Outline = true
-      t.Transparency = 0
+      t.Transparency = 1
+      t.Font = 2
+      t.ZIndex = 3
       t.Size = size or 13
       t.Visible = false
     end)
@@ -407,7 +415,8 @@ return function(api)
   local function mkLn()
     local l = shape("Line")
     pcall(function()
-      l.Transparency = 0
+      l.Transparency = 1
+      l.ZIndex = 2
       l.Visible = false
     end)
     return l
@@ -593,7 +602,7 @@ return function(api)
               if e.trace.Visible then
                 e.trace.Color = col
                 e.trace.Thickness = 1
-                e.trace.Transparency = 0.6
+                e.trace.Transparency = 0.7
                 e.trace.From = V2(vs.X / 2, vs.Y)
                 e.trace.To = V2(cx, y0 + h)
               end
@@ -763,10 +772,12 @@ return function(api)
           local size = F.radar_size or 170
           local pos = V2(vs.X - size - 16, vs.Y - size - 16)
           local bg = tshape("Square")
-          bg.Color = { R = 0.06, G = 0.06, B = 0.1 }; bg.Thickness = 1
+          bg.Color = Color3.fromRGB(15, 15, 26); bg.Thickness = 1
+          bg.Filled = true; bg.Transparency = 0.55
           bg.Size = V2(size, size); bg.Position = V2(pos.X, pos.Y)
           local bd = tshape("Square")
-          bd.Color = { R = 0.25, G = 0.55, B = 0.7 }; bd.Thickness = 1; bd.Filled = false
+          bd.Color = Color3.fromRGB(64, 140, 179); bd.Thickness = 1; bd.Filled = false
+          bd.Transparency = 1
           bd.Size = V2(size, size); bd.Position = V2(pos.X, pos.Y)
           local fwd, right = camera.CFrame.LookVector, camera.CFrame.RightVector
           local function dot(worldPos, col, s)
@@ -776,7 +787,7 @@ return function(api)
             if math.sqrt(dx * dx + dz * dz) > F.radar_range then return end
             local sc = (size / 2 - 4) / F.radar_range
             local p = tshape("Square")
-            p.Color = col; p.Thickness = 1
+            p.Color = col; p.Thickness = 1; p.Filled = true; p.Transparency = 1
             p.Size = V2(s, s)
             p.Position = V2(pos.X + size / 2 + dx * sc - s / 2, pos.Y + size / 2 + dz * sc - s / 2)
           end
@@ -786,15 +797,15 @@ return function(api)
               local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
               local hum = ch and ch:FindFirstChildOfClass("Humanoid")
               if hrp and hum and hum.Health > 0 then
-                dot(hrp.Position, { R = 1, G = 0.35, B = 0.35 }, 3)
+                dot(hrp.Position, Color3.fromRGB(255, 90, 90), 3)
               end
             end
           end
           for _, c in ipairs(corpseCache) do
-            if c.pos then dot(c.pos, { R = 1, G = 0.6, B = 0.15 }, 2) end
+            if c.pos then dot(c.pos, Color3.fromRGB(255, 153, 38), 2) end
           end
           for _, e in ipairs(exitCache) do
-            if e.pos then dot(e.pos, { R = 0.4, G = 0.9, B = 0.5 }, 3) end
+            if e.pos then dot(e.pos, Color3.fromRGB(102, 230, 128), 3) end
           end
         end)
       end
@@ -850,17 +861,18 @@ return function(api)
       -- fov circle
       if F.aim_circle then
         local c = tshape("Circle")
-        c.Color = { R = 0.2, G = 0.8, B = 1 }; c.Transparency = 0.5
+        c.Color = Color3.fromRGB(51, 204, 255); c.Transparency = 0.6
         c.Thickness = 1; c.NumSides = 48
         c.Radius = math.abs(fin(math.tan(math.rad(clamp(F.aim_fov or 15, 5, 90))) * vs.Y * 0.5, 10))
         c.Position = V2(vs.X / 2, vs.Y / 2)
       end
       if aimOn then
         local dotm = tshape("Square")
-        dotm.Color = { R = 1, G = 0.3, B = 0.3 }; dotm.Thickness = 2
+        dotm.Color = Color3.fromRGB(255, 77, 77); dotm.Thickness = 2
+        dotm.Filled = true
         dotm.Size = V2(7, 7)
         dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
-        dotm.Transparency = 0
+        dotm.Transparency = 1
       end
 
       gcGlow(seenGlow)
@@ -1031,7 +1043,6 @@ return function(api)
           for _ in pairs(mp) do labels = labels + 1 end
         end
         return {
-          ver = MODULE_VERSION,
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
           objs = { rigs = rigs, labels = labels },
@@ -1048,6 +1059,6 @@ return function(api)
     end
   end) end
 
-  Notify("Delta", "Loaded v" .. MODULE_VERSION .. " - eyes only, play sane", "ok")
-  print("[huma-delta] place module loaded v" .. MODULE_VERSION)
+  Notify("Delta", "Loaded - eyes only, play sane", "ok")
+  print("[huma-delta] place module loaded")
 end
