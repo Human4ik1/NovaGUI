@@ -48,6 +48,7 @@ return function(api)
     aim_hold = "right", aim_prio = "closest", aim_vis = true,
     aim_circle = true, aim_pause = true, aim_delay = 0.1,
     glow_on = false, glow_npc = false, glow_corpse = false, glow_top = true,
+    glow_vis = true, glow_viscol = Color3.fromRGB(255, 255, 255), glow_visthick = 3,
     glow_enemy = Color3.fromRGB(255, 90, 90),
     glow_npc_c = Color3.fromRGB(150, 160, 170),
     glow_corpse_c = Color3.fromRGB(255, 150, 40),
@@ -162,8 +163,8 @@ return function(api)
     m = m or 80
     return x0 + w > -m and x0 < vs.X + m and y0 + h > -m and y0 < vs.Y + m
   end
-  local function isVisible(from, to, ignoreChar)
-    if not F.aim_vis then return true end
+  local function isVisible(from, to, ignoreChar, force)
+    if not force and not F.aim_vis then return true end
     local ignore = {}
     local me = myChar()
     if me then ignore[#ignore + 1] = me end
@@ -355,7 +356,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Status line
   -- --------------------------------------------------------------------------
-  local statLbl
+  local statLbl, dbgLbl
   local statTick, nP, nC, nL = 0, 0, 0, 0
 
   -- --------------------------------------------------------------------------
@@ -417,6 +418,11 @@ return function(api)
               local col = F.esp_enemy
               local th = F.esp_thick or 2
               if F.esp_box then drawBox2D(x0, y0, w, h, col, th) end
+              -- visible outline: fat frame ONLY when the target is not
+              -- behind a wall (raycast), so open targets pop instantly
+              if F.glow_vis and isVisible(camera.CFrame.Position, hrp.Position, ch, true) then
+                drawBox2D(x0 - 3, y0 - 3, w + 6, h + 6, F.glow_viscol, F.glow_visthick or 3)
+              end
               if F.esp_health and hum.MaxHealth > 0 then
                 local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
                 local bar = shape("Line")
@@ -733,6 +739,10 @@ return function(api)
   flagToggle(gSec, "NPC", "glow_npc")
   flagToggle(gSec, "Corpses", "glow_corpse")
   flagToggle(gSec, "Through walls", "glow_top")
+  flagToggle(gSec, "Visible outline", "glow_vis",
+    "Fat frame around targets NOT behind a wall (wall-checked)")
+  flagSlider(gSec, "Outline thickness", "glow_visthick", 1, 6)
+  flagColor(gSec, "Outline color", "glow_viscol")
   flagColor(gSec, "Player glow", "glow_enemy")
   flagColor(gSec, "NPC glow", "glow_npc_c")
   flagColor(gSec, "Corpse glow", "glow_corpse_c")
@@ -773,7 +783,7 @@ return function(api)
   aboutSec:Label("PROJECT DELTA - hub module (safe build)")
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
-  local dbgLbl = aboutSec:Label("loop - fps")
+  dbgLbl = aboutSec:Label("loop - fps")
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
   end })
