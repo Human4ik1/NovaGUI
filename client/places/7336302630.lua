@@ -76,43 +76,44 @@ return function(api)
     if prev and type(prev.Unload) == "function" then pcall(prev.Unload) end
   end
 
+  -- all features start OFF: enable only what you need, sections start collapsed
   local F = {
-    esp_on = true, -- master switch for the player ESP drawings
-    esp_box = true, esp_health = true, esp_tracer = false,
-    esp_name = true, esp_dist = true, esp_weapon = true,
+    esp_on = false, -- master switch for the player ESP drawings
+    esp_box = false, esp_health = false, esp_tracer = false,
+    esp_name = false, esp_dist = false, esp_weapon = false,
     esp_thick = 2, esp_range = 4000,
     esp_enemy = Color3.fromRGB(255, 90, 90),
     aim_on = false, aim_part = "Head", aim_fov = 15, aim_smooth = 65,
     aim_range = 1200,
     aim_hold = "right", aim_prio = "closest", aim_vis = true,
-    aim_circle = true, aim_pause = true, aim_delay = 0.1,
+    aim_circle = false, aim_pause = true, aim_delay = 0.1,
     glow_on = false, glow_npc = false, glow_corpse = false, glow_top = true,
-    glow_vis = true, glow_viscol = Color3.fromRGB(255, 255, 255), glow_visthick = 3,
+    glow_vis = false, glow_viscol = Color3.fromRGB(255, 255, 255), glow_visthick = 3,
     glow_enemy = Color3.fromRGB(255, 90, 90),
     glow_npc_c = Color3.fromRGB(150, 160, 170),
     glow_corpse_c = Color3.fromRGB(255, 150, 40),
-    glow_loot = true,
+    glow_loot = false,
     glow_cont = Color3.fromRGB(255, 170, 60),
     glow_drop = Color3.fromRGB(120, 220, 255),
     glow_quest = Color3.fromRGB(190, 120, 255),
     glow_star = Color3.fromRGB(255, 210, 90),
     glow_lootcap = 10,
-    loot_cont = true, loot_drop = true, loot_quest = true,
-    loot_hl = true, loot_keys = "card,key,defib,ledx,bitcoin,gpu,military, thermal, red, violet, gold",
+    loot_cont = false, loot_drop = false, loot_quest = false,
+    loot_hl = false, loot_keys = "card,key,defib,ledx,bitcoin,gpu,military, thermal, red, violet, gold",
     loot_col = Color3.fromRGB(120, 220, 255),
     loot_hlcol = Color3.fromRGB(255, 210, 90),
     loot_range = 1500,
-    loot_contname = true,
-    bot_esp = true, bot_col = Color3.fromRGB(255, 140, 50),
+    loot_contname = false,
+    bot_esp = false, bot_col = Color3.fromRGB(255, 140, 50),
     bot_glow = false, bot_range = 2500,
-    aim_bots = true,
-    fullbright = true,
-    corpse_on = true, corpse_ai = true,
+    aim_bots = false,
+    fullbright = false,
+    corpse_on = false, corpse_ai = false,
     corpse_col = Color3.fromRGB(255, 150, 40),
     corpse_ai_col = Color3.fromRGB(200, 170, 60),
     corpse_range = 2500,
-    npc_on = true, npc_col = Color3.fromRGB(150, 160, 170), npc_range = 2500,
-    exit_on = true, exit_col = Color3.fromRGB(110, 230, 130), exit_range = 4000,
+    npc_on = false, npc_col = Color3.fromRGB(150, 160, 170), npc_range = 2500,
+    exit_on = false, exit_col = Color3.fromRGB(110, 230, 130), exit_range = 4000,
     radar_on = false, radar_range = 800, radar_size = 170,
   }
 
@@ -1297,7 +1298,7 @@ return function(api)
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
 
-  local pSec = Tab:Section({ Name = "Players" })
+  local pSec = Tab:Section({ Name = "Players", Collapsed = true })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
   if not HAS_DRAWING then
     pSec:Paragraph("WARNING: this executor has no Drawing API. Boxes, names, distance, tracers and the radar cannot render. Glow (Highlight) still works.")
@@ -1313,7 +1314,7 @@ return function(api)
   flagSlider(pSec, "Range", "esp_range", 200, 6000, { suf = "m" })
   flagColor(pSec, "Enemy color", "esp_enemy")
 
-  local aSec = Tab:Section({ Name = "Aim" })
+  local aSec = Tab:Section({ Name = "Aim", Collapsed = true })
   aSec:Paragraph("Camera lock only — no packets, no autofire. Smooth + small FOV keeps it human.")
   flagToggle(aSec, "Aim lock", "aim_on")
   flagDropdown(aSec, "Aim part", "aim_part", { "Head", "UpperTorso", "HumanoidRootPart" })
@@ -1327,7 +1328,7 @@ return function(api)
   flagToggle(aSec, "FOV circle", "aim_circle")
   flagToggle(aSec, "Pause while hub open", "aim_pause")
 
-  local gSec = Tab:Section({ Name = "Glow" })
+  local gSec = Tab:Section({ Name = "Glow", Collapsed = true })
   gSec:Paragraph("Client-side Highlights (see-through chams).")
   flagToggle(gSec, "Players", "glow_on")
   flagToggle(gSec, "NPC", "glow_npc")
@@ -1349,7 +1350,7 @@ return function(api)
   flagColor(gSec, "Quest glow", "glow_quest")
   flagColor(gSec, "Star glow", "glow_star")
 
-  local lSec = Tab:Section({ Name = "Loot" })
+  local lSec = Tab:Section({ Name = "Loot", Collapsed = true })
   lSec:Paragraph("Containers, floor drops, quest items. Starred = keyword match.")
   flagToggle(lSec, "Containers", "loot_cont")
   flagToggle(lSec, "Dropped items", "loot_drop")
@@ -1364,7 +1365,7 @@ return function(api)
   flagColor(lSec, "Loot color", "loot_col")
   flagColor(lSec, "Star color", "loot_hlcol")
 
-  local bSec = Tab:Section({ Name = "Bodies" })
+  local bSec = Tab:Section({ Name = "Bodies", Collapsed = true })
   bSec:Paragraph("Lootable bodies: player corpses + AI corpses, distinct colors.")
   flagToggle(bSec, "Corpses", "corpse_on")
   flagToggle(bSec, "AI bodies", "corpse_ai")
@@ -1372,7 +1373,7 @@ return function(api)
   flagColor(bSec, "Player body", "corpse_col")
   flagColor(bSec, "AI body", "corpse_ai_col")
 
-  local wSec = Tab:Section({ Name = "World" })
+  local wSec = Tab:Section({ Name = "World", Collapsed = true })
   wSec:Toggle({ Name = "Fullbright", Desc = "Always daylight, no dark corners",
     Default = F.fullbright == true, Flag = "pd_fullbright",
     Tooltip = "Restores raid lighting on off/unload",
@@ -1381,7 +1382,7 @@ return function(api)
       brightApply(F.fullbright)
     end })
   wSec:Paragraph("Bots are hostile AI (Faction). Traders are friendly NPC.")
-  local botSec = Tab:Section({ Name = "Bots" })
+  local botSec = Tab:Section({ Name = "Bots", Collapsed = true })
   botSec:Paragraph("Hostile AI from AiZones (Bandits etc.) — separate from trader NPC.")
   flagToggle(botSec, "Bot ESP", "bot_esp")
   flagToggle(botSec, "Bot glow", "bot_glow")
@@ -1398,7 +1399,7 @@ return function(api)
   flagSlider(wSec, "Radar range", "radar_range", 100, 2000, { suf = "m" })
   flagSlider(wSec, "Radar size", "radar_size", 100, 320, { suf = "px" })
 
-  local aboutSec = Tab:Section({ Name = "About" })
+  local aboutSec = Tab:Section({ Name = "About", Collapsed = true })
   aboutSec:Label("PROJECT DELTA - hub module v" .. MODULE_VERSION .. " (safe build)")
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
