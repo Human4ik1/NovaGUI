@@ -557,6 +557,9 @@ return function(api)
   -- (name/rarity/isNew/seed) and the reel is pure cosmetics. Proven live that
   -- hiding BoxOpening changes nothing: opens and rewards flow 1:1 while the
   -- gui is off. So: hide the reel, surface the result instantly.
+  -- NOTE: hiding once is not enough — the game re-shows the reel on every
+  -- open *after* our event-hide runs. The heartbeat pin below re-hides it
+  -- every frame while skip is on, so the animation can never be seen.
   local function applyBoxSkip()
     pcall(function()
       local pg = LP:FindFirstChild("PlayerGui")
@@ -564,6 +567,9 @@ return function(api)
       if bo then bo.Enabled = not S.skipBox end
     end)
   end
+  table.insert(S.conns, game:GetService("RunService").Heartbeat:Connect(function()
+    if S.skipBox then applyBoxSkip() end
+  end))
   if OpenBoxEv then
     table.insert(S.conns, OpenBoxEv.OnClientEvent:Connect(function(d)
       if type(d) ~= "table" or not S.skipBox then return end
