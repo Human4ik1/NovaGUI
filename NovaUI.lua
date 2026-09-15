@@ -1,5 +1,5 @@
 --[[
-  NovaUI v0.3.0 — single-file UI library for Roblox app interfaces.
+  NovaUI v0.4.0 — single-file UI library for Roblox app interfaces.
   Zero dependencies, loadstring-ready, runs from Studio to live games.
 
   GitHub usage (pin a version tag, not main):
@@ -17,6 +17,9 @@
     sec:Slider({ Name = "Volume", Min = 0, Max = 100, Default = 80, Flag = "volume" })
     -- read anywhere: Nova.Flags.feature_on, Nova.Flags.volume
     -- persist: Nova:Save("default") / Nova:Load("default")
+    -- startup: Nova:LoadAuto() after core controls exist; late controls restore automatically.
+    -- nested pages: tab:Navigation():Page({ Name = "Players", Icon = "□" }):Section(...)
+    -- Save / Load select the startup profile. Save returns success and "disk" / "memory".
 
   Controls: Label, Paragraph, Divider, Space, Button, Toggle, Slider, Dropdown
             (single + multi), Segmented, Keybind, Color, TextBox, Progress.
@@ -35,11 +38,16 @@
       clipped by a collapsed section or a scrolling page
 ]]
 local Nova = {}
-Nova.Version = "0.3.1"
+Nova.Version = "0.4.0"
 Nova.Flags = {}      -- live values, keyed by Flag (or auto Name)
 Nova._setters = {}   -- Flag -> function(value) applied on config load
 Nova._paint = {}     -- { o = Instance, k = kind, t = token } repainted by SetTheme
 Nova._wins = {}
+Nova._aliases = {}
+Nova._owners = {}
+Nova._pendingSetters = {}
+Nova._nilFlags = {}
+Nova._refreshers = {}
 
 --// Services ---------------------------------------------------------------
 local Players = game:GetService("Players")
@@ -253,7 +261,10 @@ end
 function Nova:SetTheme(nameOrTable)
   local t = type(nameOrTable) == "string" and Nova.Themes[nameOrTable] or nameOrTable
   if type(t) ~= "table" then return false end
-  if type(nameOrTable) == "string" then Nova.ThemeName = nameOrTable end
+  if type(nameOrTable) == "string" then
+    Nova.ThemeName = nameOrTable
+    if Nova._loaded and not Nova._applying then Nova._loaded.__theme = nameOrTable end
+  end
   for k, v in pairs(t) do
     Nova.Theme[ALIAS[k] or k] = v
   end
@@ -262,7 +273,17 @@ function Nova:SetTheme(nameOrTable)
     if applyPaint(e, true) then table.insert(alive, e) end
   end
   Nova._paint = alive   -- drop entries whose instances are gone
+  for obj, refresh in pairs(Nova._refreshers) do
+    if obj.Parent then refresh() else Nova._refreshers[obj] = nil end
+  end
+  if Nova._themeControl and type(nameOrTable) == "string" then
+    Nova._themeControl.Set(nameOrTable, true)
+  end
   return true
+end
+function Nova:BindTheme(control)
+  Nova._themeControl = control
+  control.Set(Nova.ThemeName, true)
 end
 function Nova:NextTheme()
   local order = { "Dark", "Mono", "Midnight", "Light" }
@@ -490,12 +511,23 @@ end
 --// Control plumbing -------------------------------------------------------
 local function fire(flag, cb, v)
   Nova.Flags[flag] = v
+  Nova._nilFlags[flag] = v == nil or nil
   if cb then
     local ok, err = pcall(cb, v)
-    if not ok then warn("[NovaUI] callback: " .. tostring(err)) end
+    if not ok then
+      warn("[NovaUI] callback: " .. tostring(err))
+      if Nova._applying then error(err, 0) end
+    end
   end
 end
-local function regSetter(flag, fn) Nova._setters[flag] = fn end
+local function regSetter(flag, fn, ctx)
+  Nova._setters[flag] = fn
+  Nova._owners[flag] = ctx
+  Nova._pendingSetters[flag] = fn
+  task.defer(function()
+    if Nova._pendingSetters[flag] == fn then Nova:ApplyPending() end
+  end)
+end
 
 -- Shared label/description/right-slot row. Clickable rows get hover + press.
 local function Row(parent, opt, clickable, rightPad)
@@ -612,12 +644,14 @@ local function addToggle(parent, opt, ctx)
       Position = UDim2.new(0, val and 21 or 3, 0.5, 0),
       BackgroundColor3 = val and Tn.OnAccent or Tn.Sub,
     }, M.pop)
+    Nova.Flags[flag] = val
+    Nova._nilFlags[flag] = val == nil or nil
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
   row.MouseButton1Click:Connect(function() h.Set(not val) end)
   if ctx then ctx.tip(row, opt.Tooltip) end
-  regSetter(flag, function(v) h.Set(v == true, false) end)
+  regSetter(flag, function(v) h.Set(v == true, false) end, ctx)
   h.Set(val, true); Nova.Flags[flag] = val
   return h
 end
@@ -667,6 +701,8 @@ local function addSlider(parent, opt, ctx)
     Tween(fill, { Size = UDim2.fromScale(r, 1) }, M.micro)
     Tween(knob, { Position = UDim2.new(r, 0, 0.5, 0) }, M.micro)
     vv.Text = tostring(val) .. (opt.Suffix or "")
+    Nova.Flags[flag] = val
+    Nova._nilFlags[flag] = val == nil or nil
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
@@ -700,7 +736,7 @@ local function addSlider(parent, opt, ctx)
     end
   end))
   ctx.tip(wrap, opt.Tooltip)
-  regSetter(flag, function(v) h.Set(tonumber(v) or min, false) end)
+  regSetter(flag, function(v) h.Set(tonumber(v) or min, false) end, ctx)
   h.Set(val, true); Nova.Flags[flag] = val
   return h
 end
@@ -782,11 +818,13 @@ local function addSegmented(parent, opt, ctx)
       if on then Tween(pill, { Position = UDim2.fromScale((i - 1) / n, 0) }, M.pop) end
       Tween(e.l, { TextColor3 = Nova.Theme[on and "OnAccent" or "Sub"] }, M.base)
     end
+    Nova.Flags[flag] = val
+    Nova._nilFlags[flag] = val == nil or nil
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
   ctx.tip(bar, opt.Tooltip)
-  regSetter(flag, function(v) h.Set(v, false) end)
+  regSetter(flag, function(v) h.Set(v, false) end, ctx)
   h.Set(val, true); Nova.Flags[flag] = val
   return h
 end
@@ -843,6 +881,7 @@ local function makePopup(ctx, anchor, height, width)
   function api.IsOpen() return open end
   api.Frame = p
   api.Anchor = anchor
+  api.Owner = ctx.popupOwner
   table.insert(ctx.popups, api)
   return api
 end
@@ -956,12 +995,19 @@ local function addDropdown(parent, opt, ctx)
       val = v
     end
     paintRows()
+    Nova.Flags[flag] = h.Get()
     if not silent then fire(flag, opt.Callback, h.Get()) end
   end
   function h.Get()
     if not multi then return val end
     local out = {}
-    for _, n in ipairs(options) do if val[tostring(n)] then table.insert(out, n) end end
+    local seen, missing = {}, {}
+    for _, n in ipairs(options) do
+      if val[tostring(n)] then table.insert(out, n); seen[tostring(n)] = true end
+    end
+    for n, on in pairs(val) do if on and not seen[n] then table.insert(missing, n) end end
+    table.sort(missing)
+    for _, n in ipairs(missing) do table.insert(out, n) end
     return out
   end
   function h.SetOptions(list, keep)
@@ -981,7 +1027,7 @@ local function addDropdown(parent, opt, ctx)
     if pop.IsOpen() then h.Close() else ctx.closePopups(pop); h.Open() end
   end)
   ctx.tip(btn, opt.Tooltip)
-  regSetter(flag, function(v) h.Set(v, false) end)
+  regSetter(flag, function(v) h.Set(v, false) end, ctx)
   h.Set(multi and h.Get() or val, true)
   Nova.Flags[flag] = h.Get()
   return h
@@ -1012,6 +1058,8 @@ local function addKeybind(parent, opt, ctx)
     val = v
     kt.Text = nameOf(v)
     Tween(kt, { TextColor3 = Nova.Theme[v and "Text" or "Sub"] }, M.micro)
+    Nova.Flags[flag] = val
+    Nova._nilFlags[flag] = val == nil or nil
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
@@ -1048,9 +1096,18 @@ local function addKeybind(parent, opt, ctx)
   end))
   ctx.tip(box, opt.Tooltip)
   regSetter(flag, function(v)
-    if type(v) == "string" and Enum.KeyCode[v] then h.Set(Enum.KeyCode[v], false)
-    else h.Set(nil, true); Nova.Flags[flag] = nil end
-  end)
+    if type(v) == "string" then
+      local key
+      for _, enum in ipairs({ Enum.KeyCode, Enum.UserInputType }) do
+        local ok, found = pcall(function() return enum[v] end)
+        if ok and found then key = found; break end
+      end
+      if not key then error("Unknown key: " .. v) end
+      v = key
+    end
+    if v ~= nil and typeof(v) ~= "EnumItem" then error("Invalid keybind") end
+    h.Set(v, false)
+  end, ctx)
   h.Set(val, true); Nova.Flags[flag] = val
   return h
 end
@@ -1072,26 +1129,31 @@ local function addTextBox(parent, opt, ctx)
   Paint(tb, "bg", "Elevated"); Paint(tb, "fg", "Text"); Paint(tb, "ph", "Mute")
   Corner(tb, 10); Pad(tb, 14, 0, 14, 0)
   local ring = Stroke(tb, "Accent", 1.4, 1)
+  local h = { Instance = wrap }
+  local setting = false
+  function h.Set(v, silent)
+    setting = true
+    tb.Text = tostring(v or "")
+    setting = false
+    Nova.Flags[flag] = tb.Text
+    if not silent then fire(flag, opt.Callback, tb.Text) end
+  end
+  function h.Get() return tb.Text end
   tb.Focused:Connect(function() Tween(ring, { Transparency = 0.1 }, M.base) end)
   tb.FocusLost:Connect(function(enter)
     Tween(ring, { Transparency = 1 }, M.base)
     Nova.Flags[flag] = tb.Text
-    if (enter or opt.FireOnAnyLoss) and opt.Callback then
-      local ok, err = pcall(opt.Callback, tb.Text)
-      if not ok then warn("[NovaUI] textbox: " .. tostring(err)) end
+    if not opt.Live and (enter or opt.FireOnAnyLoss ~= false) then
+      fire(flag, opt.Callback, tb.Text)
     end
   end)
-  if opt.Live then
-    tb:GetPropertyChangedSignal("Text"):Connect(function()
-      Nova.Flags[flag] = tb.Text
-      if opt.Callback then pcall(opt.Callback, tb.Text) end
-    end)
-  end
+  tb:GetPropertyChangedSignal("Text"):Connect(function()
+    if setting then return end
+    Nova.Flags[flag] = tb.Text
+    if opt.Live then fire(flag, opt.Callback, tb.Text) end
+  end)
   ctx.tip(tb, opt.Tooltip)
-  local h = { Instance = wrap }
-  function h.Set(v) tb.Text = tostring(v or ""); Nova.Flags[flag] = tb.Text end
-  function h.Get() return tb.Text end
-  regSetter(flag, function(v) tb.Text = tostring(v or "") end)
+  regSetter(flag, function(v) h.Set(v, false) end, ctx)
   Nova.Flags[flag] = tb.Text
   return h
 end
@@ -1183,6 +1245,8 @@ local function addColor(parent, opt, ctx)
     cursor.Position = UDim2.fromScale(ss, 1 - vv)
     hueKnob.Position = UDim2.fromScale(hh, 0.5)
     hex.Text = toHex(v)
+    Nova.Flags[flag] = val
+    Nova._nilFlags[flag] = val == nil or nil
     if not silent then fire(flag, opt.Callback, val) end
   end
   function h.Get() return val end
@@ -1234,7 +1298,7 @@ local function addColor(parent, opt, ctx)
     if pop.IsOpen() then pop.Close() else ctx.closePopups(pop); pop.Open(186) end
   end)
   ctx.tip(sw, opt.Tooltip)
-  regSetter(flag, function(v) if typeof(v) == "Color3" then h.Set(v, false) end end)
+  regSetter(flag, function(v) if typeof(v) == "Color3" then h.Set(v, false) end end, ctx)
   h.Set(val, true); Nova.Flags[flag] = val
   return h
 end
@@ -1472,6 +1536,33 @@ function Nova:Window(opts)
   function win:IsVisible() return visible end
   function win:Toggle() win:SetVisible(not visible) end
   function win:SetScale(s) Tween(scale, { Scale = clamp(s or 1, 0.6, 1.6) }, M.base) end
+  win.ConfigId = opts.Id or win.Title
+  function win:GetLayout()
+    local p, s = cont.Position, cont.Size
+    return { position = { p.X.Scale, p.X.Offset, p.Y.Scale, p.Y.Offset },
+      size = { s.X.Offset, s.Y.Offset } }
+  end
+  function win:SetLayout(layout)
+    if type(layout) ~= "table" then return end
+    local function numbers(t, n)
+      if type(t) ~= "table" then return false end
+      for i = 1, n do
+        if type(t[i]) ~= "number" or t[i] ~= t[i] or math.abs(t[i]) > 100000 then return false end
+      end
+      return true
+    end
+    local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+    if numbers(layout.size, 2) then
+      cont.Size = UDim2.fromOffset(clamp(layout.size[1], minW, math.max(minW, viewport.X / zoom())),
+        clamp(layout.size[2], minH, math.max(minH, viewport.Y / zoom())))
+    end
+    if numbers(layout.position, 4) then
+      local p, sz = layout.position, cont.Size
+      local x, y = p[1] * viewport.X + p[2], p[3] * viewport.Y + p[4]
+      cont.Position = UDim2.fromOffset(clamp(x, 90, math.max(90, viewport.X - 90)),
+        clamp(y, sz.Y.Offset / 2, math.max(sz.Y.Offset / 2, viewport.Y - 44)))
+    end
+  end
   function win:SetTitle(t) title.Text = tostring(t) end
   function win:Notify(n) return Nova:Notify(n) end
 
@@ -1480,20 +1571,18 @@ function Nova:Window(opts)
   -- Clearing (nil) disables the hotkey; the ▲/— buttons still work.
   function win:SetToggleKey(k)
     if k ~= nil then
-      local ok = pcall(function() return k.EnumType == Enum.KeyCode end)
-      if not ok then return false end
+      local ok, valid = pcall(function() return k.EnumType == Enum.KeyCode end)
+      if not ok or not valid then return false end
     end
     tkey = k
     return true
   end
   function win:GetToggleKey() return tkey end
-  if tkey then
-    ctx.bind(UserInputService.InputBegan:Connect(function(inp, gpe)
+  ctx.bind(UserInputService.InputBegan:Connect(function(inp, gpe)
       if not gpe and inp.KeyCode == tkey and UserInputService:GetFocusedTextBox() == nil then
         win:Toggle()
       end
-    end))
-  end
+  end))
   themeB.MouseButton1Click:Connect(function()
     local name = Nova:NextTheme()
     Nova:Notify({ Title = "Theme", Text = name, Type = "info", Duration = 1.6 })
@@ -1502,12 +1591,21 @@ function Nova:Window(opts)
   closeB.MouseButton1Click:Connect(function() win:Unload() end)
 
   function win:Unload()
+    if win._dead then return end
+    win._dead = true
+    ctx.closePopups(nil)
+    if Nova._themeControl and Nova._themeControl.Instance:IsDescendantOf(sg) then Nova._themeControl = nil end
     for _, c in ipairs(win._conns) do pcall(function() c:Disconnect() end) end
     for i, w in ipairs(Nova._wins) do if w == win then table.remove(Nova._wins, i) break end end
     Tween(shellPop, { Scale = 0.97 }, M.exit)
     local tw = Tween(shell, { GroupTransparency = 1 }, M.exit)
     tw.Completed:Connect(function() pcall(function() sg:Destroy() end) end)
     if opts.OnUnload then pcall(opts.OnUnload) end
+    for flag, owner in pairs(Nova._owners) do
+      if owner.win == win then
+        Nova._setters[flag], Nova._owners[flag], Nova._pendingSetters[flag] = nil, nil, nil
+      end
+    end
   end
 
   --// modal dialog
@@ -1598,6 +1696,8 @@ function Nova:Window(opts)
     local togOpt = topt.Toggle
     if type(togOpt) == "table" then
       local tst = togOpt.Default ~= false
+      local toggleFlag = togOpt.Flag or (win.ConfigId .. "/" .. tab.Name .. "/enabled")
+      nm.Size = UDim2.new(1, -80, 1, 0)
       local sw = New("TextButton", {
         Text = "", AutoButtonColor = false, BorderSizePixel = 0,
         BackgroundColor3 = T[tst and "Accent" or "Line"],
@@ -1620,16 +1720,21 @@ function Nova:Window(opts)
       end
       function tab:SetToggle(v, silent)
         tst = v == true
+        Nova.Flags[toggleFlag] = tst
         paintSw()
-        if not silent and type(togOpt.Callback) == "function" then
-          local ok, err = pcall(togOpt.Callback, tst)
-          if not ok then warn("[NovaUI] tab toggle: " .. tostring(err)) end
-        end
+        if not silent then fire(toggleFlag, togOpt.Callback, tst) end
       end
       function tab:GetToggle() return tst end
       sw.MouseButton1Click:Connect(function() tab:SetToggle(not tst) end)
       if ctx then ctx.tip(sw, togOpt.Tooltip) end
       tab._toggle = sw
+      Nova.Flags[toggleFlag] = tst
+      Nova._refreshers[sw] = paintSw
+      regSetter(toggleFlag, function(v) tab:SetToggle(v) end, ctx)
+    end
+    Nova._refreshers[tb] = function()
+      ic.TextColor3 = Nova.Theme[tab._active and "Accent" or "Mute"]
+      nm.TextColor3 = Nova.Theme[tab._active and "Text" or "Sub"]
     end
 
     function tab.Select()
@@ -1681,15 +1786,16 @@ function Nova:Window(opts)
     ctx.tip(tb, topt.Tooltip)
     table.insert(win._tabs, tab)
     tab._index = #win._tabs
-    if #win._tabs == 1 then task.defer(tab.Select) end
+    if #win._tabs == 1 then tab.Select() end
 
     --// sections ------------------------------------------------------------
-    function tab:Section(sopt)
+    local function makeSection(parent, sopt, scope, sectionCtx)
       sopt = sopt or {}
+      local ctx = sectionCtx or ctx
       local box = New("Frame", {
         BackgroundColor3 = T.Surface, BorderSizePixel = 0,
         Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-      }, page)
+      }, parent)
       Paint(box, "bg", "Surface"); Corner(box, 12); Stroke(box, "Line", 1, 0.45)
       Pad(box, 12, 10, 12, 12); List(box, 8)
 
@@ -1748,19 +1854,180 @@ function Nova:Window(opts)
       function sec:Divider() return addDivider(inner) end
       function sec:Space(h) return addSpace(inner, h) end
       function sec:Button(o) return addButton(inner, o or {}, ctx) end
-      function sec:Toggle(o) return addToggle(inner, o or {}, ctx) end
-      function sec:Slider(o) return addSlider(inner, o or {}, ctx) end
-      function sec:Dropdown(o) return addDropdown(inner, o or {}, ctx) end
-      function sec:MultiDropdown(o) o = o or {}; o.Multi = true; return addDropdown(inner, o, ctx) end
-      function sec:Segmented(o) return addSegmented(inner, o or {}, ctx) end
-      function sec:Keybind(o) return addKeybind(inner, o or {}, ctx) end
-      function sec:Color(o) return addColor(inner, o or {}, ctx) end
-      function sec:TextBox(o) return addTextBox(inner, o or {}, ctx) end
+      local counts = {}
+      local function control(factory, options, multi)
+        local o = {}
+        for k, v in pairs(options or {}) do o[k] = v end
+        if multi then o.Multi = true end
+        if not o.Flag then
+          local name = o.Name or "opt"
+          counts[name] = (counts[name] or 0) + 1
+          local legacy = autoFlag(name)
+          o.Flag = scope .. "/" .. (sopt.Id or sopt.Name or "General") .. "/" .. name
+          if counts[name] > 1 then o.Flag = o.Flag .. "/" .. counts[name] end
+          Nova._aliases[legacy] = o.Flag
+        end
+        local handle = factory(inner, o, ctx)
+        handle.Flag = o.Flag
+        Nova._refreshers[handle.Instance] = function() handle.Set(handle.Get(), true) end
+        return handle
+      end
+      function sec:Toggle(o) return control(addToggle, o) end
+      function sec:Slider(o) return control(addSlider, o) end
+      function sec:Dropdown(o) return control(addDropdown, o) end
+      function sec:MultiDropdown(o) return control(addDropdown, o, true) end
+      function sec:Segmented(o) return control(addSegmented, o) end
+      function sec:Keybind(o) return control(addKeybind, o) end
+      function sec:Color(o) return control(addColor, o) end
+      function sec:TextBox(o) return control(addTextBox, o) end
       function sec:Progress(o) return addProgress(inner, o or {}) end
       function sec:SetCollapsed(v) setCollapsed(v == true) end
       function sec:IsCollapsed() return collapsed end
       if sopt.Collapsed then task.defer(function() sec:SetCollapsed(true) end) end
       return sec
+    end
+
+    local tabScope = win.ConfigId .. "/" .. (topt.Id or tab.Name)
+    function tab:Section(sopt) return makeSection(page, sopt, tabScope) end
+
+    -- A second, persistent sidebar inside the tab. Only the content pages switch.
+    function tab:Navigation(nopt)
+      if tab._navigation then return tab._navigation end
+      nopt = nopt or {}
+      page.Visible = false
+      local root = New("Frame", { Name = "Navigation", BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1) }, pageHost)
+      local rail = New("ScrollingFrame", { Name = "Sidebar", BackgroundTransparency = 1,
+        BorderSizePixel = 0, Size = UDim2.new(0, 142, 1, 0), CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 2, ScrollBarImageColor3 = T.Mute }, root)
+      Paint(rail, "scroll", "Mute"); Pad(rail, 10, 14, 10, 14); List(rail, 6)
+      local line = New("Frame", { BackgroundColor3 = T.Line, BorderSizePixel = 0,
+        Size = UDim2.new(0, 1, 1, -28), Position = UDim2.fromOffset(142, 14) }, root)
+      Paint(line, "bg", "Line")
+      local content = New("Frame", { Name = "Content", BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(143, 0), Size = UDim2.new(1, -143, 1, 0) }, root)
+      local caption = Txt(content, nopt.Name or "Places", { size = 16, w = "SemiBold",
+        sz = UDim2.new(1, -32, 0, 24), truncate = true })
+      caption.Position = UDim2.fromOffset(16, 14)
+      local nav = { Instance = root, Sidebar = rail, Content = content, _pages = {}, _active = nil }
+      tab._navigation = nav
+      local function layout()
+        local compact = root.AbsoluteSize.X / zoom() < 620
+        local width = compact and 56 or (nopt.Width or 142)
+        rail.Size = UDim2.new(0, width, 1, 0)
+        line.Position = UDim2.fromOffset(width, 14)
+        content.Position = UDim2.fromOffset(width + 1, 0)
+        content.Size = UDim2.new(1, -width - 1, 1, 0)
+        for _, item in ipairs(nav._pages) do
+          item._label.Visible = not compact
+          item._icon.Position = compact and UDim2.new(0.5, -10, 0.5, -10) or UDim2.new(0, 10, 0.5, -10)
+        end
+      end
+      ctx.bind(root:GetPropertyChangedSignal("AbsoluteSize"):Connect(layout))
+      function nav:Page(popt)
+        popt = popt or {}
+        local id = popt.Id or popt.Name or tostring(#nav._pages + 1)
+        for _, item in ipairs(nav._pages) do assert(item.Id ~= id, "Duplicate navigation page: " .. id) end
+        local button = New("TextButton", { Name = id, Text = "", AutoButtonColor = false,
+          BackgroundColor3 = T.Elevated, BackgroundTransparency = 1, BorderSizePixel = 0,
+          Size = UDim2.new(1, 0, 0, 38), LayoutOrder = popt.Order or #nav._pages + 1 }, rail)
+        Paint(button, "bg", "Elevated"); Corner(button, 9)
+        local icon = Txt(button, popt.Icon or "•", { size = 17, token = "Mute",
+          xa = Enum.TextXAlignment.Center, sz = UDim2.fromOffset(20, 20) })
+        local label = Txt(button, popt.Name or id, { size = 12, token = "Sub", truncate = true,
+          sz = UDim2.new(1, -40, 1, 0) })
+        label.Position = UDim2.fromOffset(38, 0)
+        local bar = New("Frame", { BackgroundColor3 = T.Accent, BorderSizePixel = 0,
+          Position = UDim2.new(0, 0, 0.5, -9), Size = UDim2.fromOffset(3, 18), Visible = false }, button)
+        Paint(bar, "bg", "Accent"); Corner(bar, 2)
+        local scroll = New("ScrollingFrame", { Name = id, BackgroundTransparency = 1,
+          BorderSizePixel = 0, Position = UDim2.fromOffset(0, 46), Size = UDim2.new(1, 0, 1, -46),
+          CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+          ScrollingDirection = Enum.ScrollingDirection.Y, ScrollBarThickness = 2,
+          ScrollBarImageColor3 = T.Mute, Visible = false }, content)
+        Paint(scroll, "scroll", "Mute"); Pad(scroll, 16, 4, 14, 16); List(scroll, 10)
+        local item = { Id = id, Name = popt.Name or id, Instance = scroll, _btn = button,
+          _icon = icon, _label = label, _conns = {}, _popups = {} }
+        local pageCtx = {}
+        for k, v in pairs(ctx) do pageCtx[k] = v end
+        function pageCtx.bind(c)
+          table.insert(item._conns, c)
+          return ctx.bind(c)
+        end
+        -- Popups live in the overlay, so explicitly own and remove them on reload.
+        pageCtx.popupOwner = item
+        local function paintItem()
+          local on = nav._active == item
+          button.BackgroundTransparency = on and 0 or 1
+          icon.TextColor3 = Nova.Theme[on and "Accent" or "Mute"]
+          label.TextColor3 = Nova.Theme[on and "Text" or "Sub"]
+          bar.Visible = on
+        end
+        item._paint = paintItem
+        Nova._refreshers[button] = paintItem
+        function item:Select()
+          if item._dead or nav._active == item then return end
+          ctx.closePopups(nil)
+          tipToken = tipToken + 1; tipCard.Visible = false
+          nav._active = item
+          caption.Text = item.Name
+          for _, other in ipairs(nav._pages) do
+            other.Instance.Visible = other == item
+            other._paint()
+          end
+        end
+        function item:Section(sopt)
+          return makeSection(scroll, sopt, tabScope .. "/" .. id, pageCtx)
+        end
+        for _, method in ipairs({ "Label", "Paragraph", "Divider", "Space", "Button", "Toggle", "Slider",
+          "Dropdown", "MultiDropdown", "Segmented", "Keybind", "Color", "TextBox", "Progress" }) do
+          item[method] = function(_, ...)
+            if not item._defaultSec then item._defaultSec = item:Section({ Name = item.Name }) end
+            return item._defaultSec[method](item._defaultSec, ...)
+          end
+        end
+        function item:Destroy()
+          if item._dead then return end
+          item._dead = true
+          for _, c in ipairs(item._conns) do
+            pcall(function() c:Disconnect() end)
+            for i = #win._conns, 1, -1 do if win._conns[i] == c then table.remove(win._conns, i) end end
+          end
+          for i = #ctx.popups, 1, -1 do
+            local popup = ctx.popups[i]
+            if popup.Owner == item then popup.Frame:Destroy(); table.remove(ctx.popups, i) end
+          end
+          for flag, owner in pairs(Nova._owners) do
+            if owner == pageCtx then
+              Nova._setters[flag], Nova._owners[flag], Nova._pendingSetters[flag] = nil, nil, nil
+            end
+          end
+          for i, other in ipairs(nav._pages) do if other == item then table.remove(nav._pages, i); break end end
+          button:Destroy(); scroll:Destroy()
+          if nav._active == item then
+            nav._active = nil
+            if nav._pages[1] then nav._pages[1]:Select() end
+          end
+        end
+        button.MouseButton1Click:Connect(function() item:Select() end)
+        button.MouseEnter:Connect(function()
+          if nav._active ~= item then button.BackgroundTransparency = 0.5 end
+        end)
+        button.MouseLeave:Connect(paintItem)
+        ctx.tip(button, popt.Tooltip or popt.Name or id)
+        table.insert(nav._pages, item)
+        layout()
+        if not nav._active then item:Select() end
+        return item
+      end
+      function nav:Clear(keepId)
+        for i = #nav._pages, 1, -1 do
+          if nav._pages[i].Id ~= keepId then nav._pages[i]:Destroy() end
+        end
+      end
+      layout()
+      return nav
     end
 
     function tab:_default()
@@ -1783,74 +2050,223 @@ function Nova:Window(opts)
   return win
 end
 
---// Config save/load (disk persistence when the host allows it, memory fallback) -
-Nova._memCfg = {}
-local function canFile()
-  return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+--// Config persistence ------------------------------------------------------
+-- Preserve a session fallback across reinjection, but never report it as disk storage.
+local configEnv = (getgenv and getgenv()) or _G
+configEnv.__NOVA_CONFIG_MEMORY = configEnv.__NOVA_CONFIG_MEMORY or {}
+Nova._memCfg = configEnv.__NOVA_CONFIG_MEMORY
+Nova._loaded = {}
+Nova.ActiveConfig = "default"
+
+local function configName(name)
+  name = tostring(name or "default"):match("^%s*(.-)%s*$")
+  if name == "" then name = "default" end
+  if #name > 80 or name == "." or name == ".." or name == "__autoload"
+    or name:find('[/\\:%*%?"<>|%c]') or name:sub(-1) == "." then
+    return nil, "Invalid config name"
+  end
+  return name
 end
 local function encVal(v)
-  if typeof and typeof(v) == "Color3" then
-    return { t = "c3", v = { math.floor(v.R * 255 + 0.5), math.floor(v.G * 255 + 0.5), math.floor(v.B * 255 + 0.5) } }
+  if v == nil then return { t = "nil" } end
+  if typeof(v) == "Color3" then
+    return { t = "c3", v = { v.R * 255, v.G * 255, v.B * 255 } }
+  end
+  if typeof(v) == "EnumItem" then
+    return { t = "enum", enum = tostring(v.EnumType), v = v.Name }
   end
   if type(v) == "table" then
     local out = {}
-    for i, x in ipairs(v) do out[i] = tostring(x) end
+    for i, x in ipairs(v) do out[i] = x end
     return { t = "list", v = out }
   end
-  if type(v) == "userdata" and tostring(v):find("Enum") then
-    local ok, name = pcall(function() return v.Name end)
-    if ok then return { t = "enum", v = name } end
-  end
   if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then return v end
-  return nil
+  error("Unsupported config value: " .. typeof(v))
 end
 local function decVal(v)
-  if type(v) == "table" and v.t == "c3" and type(v.v) == "table" then
-    return Color3.fromRGB(v.v[1] or 0, v.v[2] or 0, v.v[3] or 0)
+  if type(v) ~= "table" then return v end
+  if v.t == "nil" then return nil end
+  if v.t == "c3" and type(v.v) == "table" then
+    for i = 1, 3 do assert(type(v.v[i]) == "number", "Invalid color") end
+    return Color3.fromRGB(v.v[1], v.v[2], v.v[3])
   end
-  if type(v) == "table" and v.t == "list" then return v.v end
-  if type(v) == "table" and v.t == "enum" then return v.v end -- setter resolves KeyCode
-  return v
+  if v.t == "list" and type(v.v) == "table" then return v.v end
+  if v.t == "enum" then
+    if v.enum then
+      local enum = v.enum == "Enum.UserInputType" and Enum.UserInputType or Enum.KeyCode
+      return enum[v.v]
+    end
+    return v.v -- legacy keybinds stored only the name
+  end
+  error("Invalid encoded config value")
+end
+local function readConfigFile(name)
+  local json
+  if type(readfile) == "function" then
+    local ok, value = pcall(readfile, "NovaUI/" .. name .. ".json")
+    if ok then json = value end
+  end
+  json = json or Nova._memCfg[name]
+  if not json then return nil, "missing" end
+  local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
+  if not ok or type(data) ~= "table" then return nil, "Invalid JSON in '" .. name .. "'" end
+  return data
+end
+local function writeConfigFile(name, data)
+  local encoded, json = pcall(HttpService.JSONEncode, HttpService, data)
+  if not encoded then return false, tostring(json) end
+  Nova._memCfg[name] = json
+  if type(writefile) ~= "function" or type(readfile) ~= "function" then return true, "memory" end
+  local ok, err = pcall(function()
+    if type(makefolder) == "function" then
+      if type(isfolder) == "function" then
+        if not isfolder("NovaUI") then makefolder("NovaUI") end
+      else
+        pcall(makefolder, "NovaUI")
+      end
+    end
+    local path = "NovaUI/" .. name .. ".json"
+    -- Keep the previous valid file recoverable if the host interrupts a write.
+    local previousOK, previous = pcall(readfile, path)
+    if previousOK and type(previous) == "string" then writefile(path .. ".bak", previous) end
+    writefile(path, json)
+    assert(readfile(path) == json, "Config verification failed")
+  end)
+  if not ok then return false, tostring(err) end
+  return true, "disk"
+end
+local function savedValue(flag)
+  if Nova._loaded[flag] ~= nil then return Nova._loaded[flag], true end
+  for legacy, current in pairs(Nova._aliases) do
+    if current == flag and Nova._loaded[legacy] ~= nil then return Nova._loaded[legacy], true end
+  end
+  return nil, false
+end
+local function applySetters(setters)
+  local order = {}
+  for flag in pairs(setters) do table.insert(order, flag) end
+  local function priority(flag)
+    if flag == "huma_universal_enabled" then return -10 end
+    local value = savedValue(flag)
+    return type(value) == "boolean" and 10 or 0
+  end
+  table.sort(order, function(a, b)
+    local pa, pb = priority(a), priority(b)
+    if pa ~= pb then return pa < pb end
+    return a < b
+  end)
+  local count, errors = 0, {}
+  Nova._applying = true
+  for _, flag in ipairs(order) do
+    local setter = setters[flag]
+    if Nova._setters[flag] == setter then
+      Nova._pendingSetters[flag] = nil
+      local value, exists = savedValue(flag)
+      if exists then
+        local ok, err = pcall(function() setter(decVal(value)) end)
+        if ok then count = count + 1 else table.insert(errors, flag .. ": " .. tostring(err)) end
+      end
+    end
+  end
+  Nova._applying = false
+  -- __theme is authoritative, including old configs with a stale Theme dropdown.
+  if Nova.Themes[Nova._loaded.__theme] then Nova:SetTheme(Nova._loaded.__theme) end
+  return count, errors
+end
+function Nova:ApplyPending()
+  local pending = {}
+  for flag, fn in pairs(Nova._pendingSetters) do pending[flag] = fn end
+  local count, errors = applySetters(pending)
+  if #errors > 0 then
+    warn("[NovaUI] config: " .. table.concat(errors, "\n"))
+    Nova:Notify({ Title = "Config", Text = "Some module settings failed to restore (F9 console)", Type = "error" })
+  end
+  return #errors == 0, count
+end
+function Nova:Snapshot()
+  local data = {}
+  -- Retain settings of modules absent in this place, or still downloading.
+  for flag, value in pairs(Nova._loaded) do
+    if not Nova._aliases[flag] then data[flag] = value end
+  end
+  for flag, value in pairs(Nova.Flags) do
+    if Nova._setters[flag] or data[flag] == nil then data[flag] = encVal(value) end
+  end
+  for flag in pairs(Nova._nilFlags) do
+    if Nova._setters[flag] or data[flag] == nil then data[flag] = encVal(nil) end
+  end
+  data.__version, data.__theme = 2, Nova.ThemeName
+  data.__windows = {}
+  for _, win in ipairs(Nova._wins) do data.__windows[win.ConfigId] = win:GetLayout() end
+  return data
 end
 function Nova:Save(name)
-  name = name or "default"
-  local data = {}
-  for flag, v in pairs(Nova.Flags) do data[flag] = encVal(v) end
-  data.__theme = Nova.ThemeName
-  local json = HttpService:JSONEncode(data)
-  if canFile() then
-    pcall(function()
-      if makefolder and isfolder and not isfolder("NovaUI") then makefolder("NovaUI") end
-      writefile("NovaUI/" .. tostring(name) .. ".json", json)
-    end)
-  else
-    Nova._memCfg[name] = json
-  end
-  Nova:Notify({ Title = "Config", Text = "Saved '" .. tostring(name) .. "'", Type = "ok" })
-end
-function Nova:Load(name)
-  name = name or "default"
-  local json
-  if canFile() then
-    local ok, c = pcall(readfile, "NovaUI/" .. tostring(name) .. ".json")
-    if ok then json = c end
-  else
-    json = Nova._memCfg[name]
-  end
-  if not json then
-    Nova:Notify({ Title = "Config", Text = "Not found: " .. tostring(name), Type = "error" })
+  local valid, err = configName(name)
+  if not valid then Nova:Notify({ Title = "Config", Text = err, Type = "error" }); return false end
+  local ok, data = pcall(function() return Nova:Snapshot() end)
+  if not ok then Nova:Notify({ Title = "Config", Text = tostring(data), Type = "error" }); return false end
+  data.huma_cfg = valid
+  local saved, storage = writeConfigFile(valid, data)
+  if not saved then
+    Nova:Notify({ Title = "Config", Text = "Could not save to disk: " .. storage, Type = "error" })
     return false
   end
-  local ok, data = pcall(HttpService.JSONDecode, HttpService, json)
-  if not ok or type(data) ~= "table" then return false end
-  if data.__theme and Nova.Themes[data.__theme] then Nova:SetTheme(data.__theme) end
-  local n = 0
-  for flag, v in pairs(data) do
-    local set = Nova._setters[flag]
-    if set then local s = pcall(set, decVal(v)); if s then n = n + 1 end end
+  local selected, selectionErr = writeConfigFile("__autoload", { name = valid })
+  if not selected then
+    Nova:Notify({ Title = "Config", Text = "Saved, but could not enable autoload: " .. selectionErr, Type = "error" })
+    return false
   end
-  Nova:Notify({ Title = "Config", Text = "Loaded '" .. tostring(name) .. "' (" .. n .. ")", Type = "ok" })
+  Nova.ActiveConfig, Nova._loaded = valid, data
+  Nova:SetFlag("huma_cfg", valid)
+  Nova:Notify({ Title = "Config", Type = storage == "disk" and "ok" or "warn",
+    Text = storage == "disk" and ("Saved '" .. valid .. "' · autoload enabled")
+      or "Saved for this session only: executor file access is unavailable" })
+  return true, storage
+end
+function Nova:Load(name, options)
+  options = options or {}
+  local valid, err = configName(name)
+  if not valid then Nova:Notify({ Title = "Config", Text = err, Type = "error" }); return false end
+  local data, readErr = readConfigFile(valid)
+  if not data then
+    if not (options.Optional and readErr == "missing") then
+      Nova:Notify({ Title = "Config", Text = readErr == "missing" and ("Not found: " .. valid) or readErr, Type = "error" })
+    end
+    return false
+  end
+  if data.__version and data.__version ~= 2 then
+    Nova:Notify({ Title = "Config", Text = "Unsupported config version", Type = "error" }); return false
+  end
+  Nova._loaded = data
+  Nova.ActiveConfig = valid
+  local count, errors = applySetters(Nova._setters)
+  if type(data.__windows) == "table" then
+    for _, win in ipairs(Nova._wins) do win:SetLayout(data.__windows[win.ConfigId]) end
+  end
+  Nova:SetFlag("huma_cfg", valid)
+  if #errors > 0 then
+    warn("[NovaUI] config: " .. table.concat(errors, "\n"))
+    Nova:Notify({ Title = "Config", Text = "Loaded with " .. #errors .. " errors (F9 console)", Type = "error" })
+    return false
+  end
+  if not options.Auto then
+    local ok, why = writeConfigFile("__autoload", { name = valid })
+    if not ok then
+      Nova:Notify({ Title = "Config", Text = "Loaded, but autoload could not be saved: " .. why, Type = "error" })
+      return false
+    end
+  end
+  if not options.Quiet then
+    Nova:Notify({ Title = "Config", Text = "Loaded '" .. valid .. "' (" .. count .. ")", Type = "ok" })
+  end
   return true
+end
+function Nova:LoadAuto()
+  local selected, err = readConfigFile("__autoload")
+  if not selected and err ~= "missing" then
+    Nova:Notify({ Title = "Config", Text = err, Type = "error" })
+  end
+  return Nova:Load(selected and selected.name or "default", { Auto = true, Optional = true, Quiet = true })
 end
 function Nova:GetFlag(flag, fallback)
   local v = Nova.Flags[flag]
@@ -1859,8 +2275,17 @@ function Nova:GetFlag(flag, fallback)
 end
 function Nova:SetFlag(flag, v)
   local set = Nova._setters[flag]
-  if set then pcall(set, v) else Nova.Flags[flag] = v end
+  if set then
+    local ok, err = pcall(set, v)
+    if not ok then warn("[NovaUI] flag " .. flag .. ": " .. tostring(err)) end
+    return ok
+  end
+  Nova.Flags[flag] = v
+  Nova._nilFlags[flag] = v == nil or nil
+  Nova._loaded[flag] = encVal(v)
+  return true
 end
+
 function Nova:UnloadAll()
   while #Nova._wins > 0 do Nova._wins[1]:Unload() end
   pcall(function() if _notifHolder then _notifHolder:Destroy() end end)
