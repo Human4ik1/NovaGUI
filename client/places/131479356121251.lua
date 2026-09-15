@@ -24,6 +24,11 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
+  local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hub)
+
+  local function hud(key, text)
+    if Hud then pcall(function() Hud(key, text) end) end
+  end
 
   local Players = game:GetService("Players")
   local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -35,9 +40,11 @@ return function(api)
     pcall(function() for _, c in ipairs(old.conns or {}) do c:Disconnect() end end)
   end
   local S = {
-    marker = false, bingo = false,
+    marker = false, bingo = false, maxProfit = false,
     conns = {}, daubs = 0, claims = 0, calls = 0,
     claimTries = {}, claimLast = {}, lastCall = 0, enabledAt = 0,
+    seen = {}, -- union of every number observed since enable (event+panel)
+    rivalClaimed = false, stagePattern = nil, holdMsg = "",
     patCache = nil, patTick = 0,
   }
   getgenv().__HUMA_BINGO = S
@@ -68,11 +75,13 @@ return function(api)
     pcall(function()
       statsLbl.Set(("daubs %d · claims %d · calls %d"):format(S.daubs, S.claims, S.calls))
     end)
+    hud("bingoStats", ("bingo · daubs %d · claims %d · calls %d"):format(S.daubs, S.claims, S.calls))
   end
 
   local function setStatus(t)
     print("[huma-bingo] " .. tostring(t))
     pcall(function() statusLbl.Set(tostring(t)) end)
+    hud("bingo", tostring(t))
   end
 
   --// core: cards -----------------------------------------------------------
@@ -248,15 +257,23 @@ return function(api)
     return false
   end
 
-  -- Claim with a retry budget (max 8 tries, ≥3s apart) instead of a
-  -- permanent lock: the reconciler retries while the card is still winning.
-  local function tryClaim(idx)
+  -- Claim with a retry budget (max 8 tries, ≥3s apart). Budget resets every
+  -- round AND every stage (new figure). `force` bypasses the caps — used for
+  -- rival-claim and last-number failsafes (better something than nothing).
+  local function tryClaim(idx, force)
     local now = os.clock()
-    local tries = S.claimTries[idx] or 0
-    if tries >= 8 then return end
-    if now - (S.claimLast[idx] or 0) < 3 then return end
-    S.claimTries[idx] = tries + 1
-    S.claimLast[idx] = now
+    local tryNo
+    if not force then
+      local tries = S.claimTries[idx] or 0
+      if tries >= 8 then return end
+      if now - (S.claimLast[idx] or 0) < 3 then return end
+      S.claimTries[idx] = tries + 1
+      S.claimLast[idx] = now
+      tryNo = tries + 1
+    else
+      S.claimLast[idx] = now
+      tryNo = "FORCE"
+    end
     S.claims = S.claims + 1
     -- primary path: the game's own Bingo button (its handler picks the
     -- winning card itself — no arg guessing). Fallback: direct ClaimBingo.
@@ -271,41 +288,82 @@ return function(api)
       end
     end)
     pcall(function() ClaimBingo:FireServer(idx) end)
-    setStatus("claim sent, card " .. idx .. " (try " .. (tries + 1) .. ")")
+    setStatus("claim sent, card " .. idx .. " (try " .. tostring(tryNo) .. ")")
     refreshStats()
   end
 
-  local function claimPass()
+  -- MAX PROFIT gate. OFF = claim every winning card ASAP (old behavior).
+  -- ON = hold until EVERY owned card completes the figure, then claim all —
+  -- except two failsafes that force an instant claim of whatever wins:
+  --   1) rivalClaimed — someone else just claimed (RoundState ClaimWindow);
+  --   2) lastNumber  — 74+ of 75 numbers are out, the game is about to end.
+  local function claimPass(force)
     if not S.bingo then return end
     local fresh = cards()
+    local winners, total = {}, 0
     for idx, grid in pairs(fresh) do
-      if hasBingo(grid) then tryClaim(idx) end
+      total = total + 1
+      if hasBingo(grid) then table.insert(winners, idx) end
     end
+    if #winners == 0 then
+      S.holdMsg = ""
+      return
+    end
+    local calledN = 0
+    for _ in pairs(S.seen) do calledN = calledN + 1 end
+    local lastNumber = calledN >= 74
+    local allWin = total > 0 and #winners >= total
+    local go = (not S.maxProfit) or force or allWin or S.rivalClaimed or lastNumber
+    if not go then
+      local msg = ("holding %d/%d for max profit"):format(#winners, total)
+      if S.holdMsg ~= msg then
+        S.holdMsg = msg
+        setStatus(msg)
+      end
+      return
+    end
+    local why = "single"
+    local forceClaim = force == true
+    if S.rivalClaimed then why, forceClaim = "RIVAL", true end
+    if lastNumber then why, forceClaim = "LAST-NUMBER", true end
+    if allWin then why = "ALL-WIN" end
+    for _, idx in ipairs(winners) do
+      tryClaim(idx, forceClaim or nil)
+    end
+    setStatus(("claiming %d/%d (%s)"):format(#winners, total, why))
   end
 
-  -- One full pass: daub EVERY unmarked cell holding a called number on
-  -- EVERY card (the old code fired a single cell per number — with 6 cards
-  -- that silently skipped most of the board), then claims on a fresh read.
+  -- FULL SWEEP: press EVERY unmarked cell on every card. Proven live that
+  -- the game's own click handler silently ignores uncalled numbers WITHOUT
+  -- sending any remote — so blanket-pressing costs traffic only for numbers
+  -- that were really called, and needs no call history at all. Join mid-game
+  -- with half the board unknown: one sweep still marks everything callable.
+  -- Cells with known-called numbers are tracked for verify+retry.
   local function sync(src)
     if not (S.marker or S.bingo) then return 0 end
     local balls = readBalls()
+    for n in pairs(balls) do S.seen[n] = true end
     local cs = cards()
-    local fired, firedList = 0, {}
+    local pressed, known, firedList = 0, 0, {}
     if S.marker then
       for idx, grid in pairs(cs) do
         for _, cell in pairs(grid) do
-          if cell.num and balls[cell.num] and not cell.marked and cell.ref then
+          if cell.ref and not cell.marked then
             if fireCellAll(idx, cell.col, cell.row, cell.ref) > 0 then
-              fired = fired + 1
-              S.daubs = S.daubs + 1
-              table.insert(firedList, { idx = idx, col = cell.col, row = cell.row, n = cell.num })
+              pressed = pressed + 1
+              if cell.num and (balls[cell.num] or S.seen[cell.num]) then
+                known = known + 1
+                S.daubs = S.daubs + 1
+                table.insert(firedList, { idx = idx, col = cell.col, row = cell.row, n = cell.num })
+              end
             end
           end
         end
+        task.wait(0.03) -- gentle pacing per card
       end
     end
-    if fired > 0 then
-      setStatus(src .. ": fired " .. fired .. " (total " .. S.daubs .. ")")
+    if pressed > 0 then
+      setStatus(src .. ": swept " .. pressed .. " cells (" .. known .. " called, total " .. S.daubs .. ")")
       refreshStats()
       -- async verify (server stamps with a delay): retry what is still blank
       task.spawn(function()
@@ -334,7 +392,7 @@ return function(api)
       end)
     end
     claimPass()
-    return fired
+    return pressed
   end
 
   local function parseNumber(data)
@@ -359,8 +417,8 @@ return function(api)
 
   local function catchUp()
     task.spawn(function()
-      local total = sync("catchup")
-      setStatus("catch-up: " .. total .. " marks (total " .. S.daubs .. ")")
+      local total = sync("catchup") or 0
+      setStatus("catch-up: swept " .. total .. " cells (total " .. S.daubs .. ")")
       refreshStats()
     end)
   end
@@ -370,11 +428,12 @@ return function(api)
     S.calls = S.calls + 1
     S.lastCall = os.clock()
     local n = parseNumber(data)
+    if n then S.seen[n] = true end
     if not n then setStatus("saw malformed call #" .. S.calls) return end
     if not (S.marker or S.bingo) then setStatus("saw " .. n .. " (toggles off)") return end
     local hit = sync("live")
     if hit == 0 then
-      setStatus("saw " .. n .. " (nothing new, calls " .. S.calls .. ")")
+      setStatus("saw " .. n .. " (board clean, calls " .. S.calls .. ")")
     end
     refreshStats()
   end))
@@ -382,9 +441,59 @@ return function(api)
   table.insert(S.conns, CardsAssigned.OnClientEvent:Connect(function()
     S.claimTries = {}
     S.claimLast = {}
+    S.seen = {}
+    S.rivalClaimed = false
+    S.holdMsg = ""
     S.patCache = nil
     setStatus("new round — claims reset")
+    task.spawn(function() pcall(function() sync("round") end) end)
   end))
+
+  -- RoundState: rival-claim radar + per-stage budget reset.
+  -- Seen live: Playing{pattern}, ClaimWindow{claimantName}, Claim{claimants},
+  -- StageWinner{payouts,winnerNames}, Dance{...}. A round has 3 stages; each
+  -- new figure gets a fresh claim budget.
+  local RS = Remotes:FindFirstChild("RoundState")
+  if RS then
+    table.insert(S.conns, RS.OnClientEvent:Connect(function(d)
+      if type(d) ~= "table" then return end
+      local phase = d.phase
+      if phase == "Playing" then
+        local pat = d.pattern or d.patternLabel
+        if pat and pat ~= S.stagePattern then
+          S.stagePattern = tostring(pat)
+          S.claimTries = {}
+          S.claimLast = {}
+          S.rivalClaimed = false
+          S.holdMsg = ""
+          setStatus("stage figure: " .. S.stagePattern)
+        end
+      elseif phase == "ClaimWindow" then
+        local cn = d.claimantName
+        if cn and cn ~= "" and cn ~= LP.Name and S.bingo then
+          S.rivalClaimed = true
+          setStatus("rival claimed (" .. tostring(cn) .. ") — counter-claiming!")
+          Notify("Bingo", "Rival claim by " .. tostring(cn) .. " — claiming now", "warn")
+          claimPass(true)
+        end
+      elseif phase == "Claim" then
+        local cls = d.claimants
+        if type(cls) == "table" and S.bingo and not S.rivalClaimed then
+          for _, c in pairs(cls) do
+            local nm = (type(c) == "table") and (c.name or c[1]) or c
+            nm = nm ~= nil and tostring(nm) or ""
+            if nm ~= "" and nm ~= LP.Name and not nm:find("%.%.") then
+              S.rivalClaimed = true
+              setStatus("rival claim — counter-claiming!")
+              Notify("Bingo", "Rival claim — claiming now", "warn")
+              claimPass(true)
+              break
+            end
+          end
+        end
+      end
+    end))
+  end
 
   if NetNotify then
     table.insert(S.conns, NetNotify.OnClientEvent:Connect(function(d)
@@ -458,6 +567,18 @@ return function(api)
       if S.bingo then
         S.enabledAt = os.clock()
         Notify("Bingo", "Auto Bingo armed", "ok")
+      end
+    end,
+  })
+  autoSec:Toggle({
+    Name = "Max Profit", Desc = "Hold the claim until ALL cards complete the figure",
+    Default = false,
+    Tooltip = "Waits for every owned card to win, then claims all at once (bigger payout). Two failsafes still claim early: a rival's claim, or 74+ of 75 numbers out.",
+    Callback = function(v)
+      S.maxProfit = v == true
+      S.holdMsg = ""
+      if S.maxProfit then
+        Notify("Bingo", "Max Profit ON — holding for all cards", "ok")
       end
     end,
   })
