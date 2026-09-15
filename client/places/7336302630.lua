@@ -23,7 +23,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.1-rig"
+  local MODULE_VERSION = "2.4-fix"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -41,7 +41,8 @@ return function(api)
   end
 
   local F = {
-    esp_box = false, esp_health = false, esp_tracer = false,
+    esp_on = true, -- master switch for the player ESP drawings
+    esp_box = true, esp_health = true, esp_tracer = false,
     esp_name = true, esp_dist = true, esp_weapon = true,
     esp_thick = 2, esp_range = 4000,
     esp_enemy = Color3.fromRGB(255, 90, 90),
@@ -67,6 +68,17 @@ return function(api)
     radar_on = false, radar_range = 800, radar_size = 170,
   }
 
+  -- Drawing API presence: without it every shape() call throws inside a
+  -- pcall and the module looks "loaded but dead". Fail loudly instead.
+  local HAS_DRAWING = false
+  do
+    local ok = pcall(function()
+      local probe = Drawing.new("Square")
+      probe:Remove()
+    end)
+    HAS_DRAWING = ok == true
+  end
+
   local CONNS = {}
   local function reg(c) table.insert(CONNS, c) return c end
   local unloadModule -- fwd (About button runs at click-time)
@@ -78,27 +90,57 @@ return function(api)
 
   -- --------------------------------------------------------------------------
   -- Drawing objects: TWO lifecycles, never mixed.
-  --   shape()     = persistent (rigs, labels): lives until explicitly
-  --                 removed (unload/GC). NEVER auto-recycled.
-  --   tshape()    = transient (radar blips, fov circle, lock dot): lives
-  --                 exactly one frame, cleared at the next frame start.
+  --   shape()     = persistent (rigs, labels): created once per entity,
+  --                 only repositioned per frame. NEVER auto-recycled.
+  --   tshape()    = transient (radar blips, fov circle, lock dot): pooled
+  --                 per type, hidden at frame start, reused on demand.
   -- Mixing them (auto-recycling persistent rigs) deletes the ESP two
-  -- frames after creation — that was the invisible-ESP bug.
+  -- frames after creation.
+  --
+  -- THE RULE THAT BROKE EVERYTHING BEFORE: in the Drawing API,
+  -- `Transparency` is OPACITY. 1 = fully visible, 0 = fully INVISIBLE,
+  -- which is the opposite of a Roblox Instance. Objects default to 1.
+  -- Setting it to 0 makes an object that is Visible, positioned and
+  -- correctly coloured - and draws nothing at all.
   -- --------------------------------------------------------------------------
-  local transient = {}
+  local pools = {}
   local function shape(typ)
     local s = Drawing.new(typ)
+    -- Drawing API quirk: Transparency is OPACITY. 1 = solid, 0 = INVISIBLE.
+    -- Everything starts solid; nothing in this file may set it to 0.
+    pcall(function() s.Transparency = 1 end)
     s.Visible = true
     return s
   end
+  -- transient objects are POOLED per type: hidden at frame start, reused on
+  -- demand. The old code created + :Remove()'d dozens of objects per frame,
+  -- which some executors rate-limit (drawings silently stop appearing).
   local function tshape(typ)
-    local s = shape(typ)
-    transient[#transient + 1] = s
+    local pool = pools[typ]
+    if not pool then pool = { objs = {}, n = 0 }; pools[typ] = pool end
+    pool.n = pool.n + 1
+    local s = pool.objs[pool.n]
+    if not s then
+      s = shape(typ)
+      pool.objs[pool.n] = s
+    end
+    pcall(function() s.Visible = true end)
     return s
   end
   local function clearTransient()
-    for _, s in ipairs(transient) do pcall(function() s:Remove() end) end
-    transient = {}
+    for _, pool in pairs(pools) do
+      for i = 1, #pool.objs do
+        local o = pool.objs[i]
+        pcall(function() o.Visible = false end)
+      end
+      pool.n = 0
+    end
+  end
+  local function freeTransient()
+    for typ, pool in pairs(pools) do
+      for _, o in ipairs(pool.objs) do pcall(function() o:Remove() end) end
+      pools[typ] = nil
+    end
   end
 
   -- --------------------------------------------------------------------------
@@ -285,8 +327,12 @@ return function(api)
   local lootMap, corpseMap, npcMap, exitMap = {}, {}, {}, {}
   local function mkLabel(size)
     local t = shape("Text")
-    t.Center = true; t.Outline = true; t.Transparency = 0
-    t.Size = size or 12; t.Visible = false
+    pcall(function()
+      t.Center = true; t.Outline = true
+      t.Transparency = 1 -- was 0 = fully invisible
+      t.Font = 2; t.ZIndex = 3
+      t.Size = size or 12; t.Visible = false
+    end)
     return t
   end
   local function killDraw(o) pcall(function() o:Remove() end) end
@@ -352,7 +398,13 @@ return function(api)
       return
     end
     if prev and prev.Parent then
-      if prev.FillColor ~= col then prev.FillColor = col end
+      -- refresh live props so the Through-walls / colour toggles apply to
+      -- highlights that already exist (they used to be frozen at creation)
+      pcall(function()
+        if prev.FillColor ~= col then prev.FillColor = col end
+        prev.DepthMode = F.glow_top and Enum.HighlightDepthMode.AlwaysOnTop
+          or Enum.HighlightDepthMode.Occluded
+      end)
       return
     end
     local ok, hl = pcall(function()
@@ -389,6 +441,8 @@ return function(api)
     local s = shape("Square")
     pcall(function()
       s.Filled = fill == true
+      s.Transparency = 1
+      s.ZIndex = fill and 1 or 2
       s.Visible = false
     end)
     return s
@@ -398,7 +452,9 @@ return function(api)
     pcall(function()
       t.Center = true
       t.Outline = true
-      t.Transparency = 0
+      t.Transparency = 1 -- was 0: this is why names/dist/weapon never drew
+      t.Font = 2
+      t.ZIndex = 4
       t.Size = size or 13
       t.Visible = false
     end)
@@ -407,7 +463,8 @@ return function(api)
   local function mkLn()
     local l = shape("Line")
     pcall(function()
-      l.Transparency = 0
+      l.Transparency = 1 -- was 0: tracers + corner lines never drew
+      l.ZIndex = 2
       l.Visible = false
     end)
     return l
@@ -421,6 +478,7 @@ return function(api)
     e.hback = mkSq(true)
     e.hfill = mkSq(true)
     e.name = mkTx(13)
+    e.dist = mkTx(12)
     e.weapon = mkTx(12)
     e.trace = mkLn()
     for i = 1, 8 do e.corners[i] = mkLn() end
@@ -429,7 +487,7 @@ return function(api)
   end
   local function hideRig(e)
     if not e then return end
-    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "weapon", "trace" }) do
+    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "dist", "weapon", "trace" }) do
       local o = e[k]
       if o then pcall(function() o.Visible = false end) end
     end
@@ -440,7 +498,7 @@ return function(api)
   local function freeRig(plr)
     local e = pesc[plr]
     if not e then return end
-    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "weapon", "trace" }) do
+    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "dist", "weapon", "trace" }) do
       local o = e[k]
       if o then pcall(function() o:Remove() end) end
     end
@@ -454,7 +512,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Aim state
   -- --------------------------------------------------------------------------
-  local aimCur, aimOn, aimSince, aimLastPos = nil, false, 0, nil
+  local aimOn, aimSince, aimLastPos = false, 0, nil
   local function aimPoint(model, part)
     local inst = (part == "Head" and model:FindFirstChild("Head"))
       or (part == "UpperTorso" and model:FindFirstChild("UpperTorso"))
@@ -465,7 +523,10 @@ return function(api)
   end
   local function hubOpen()
     local ok, vis = pcall(function() return api.Win:IsVisible() end)
-    return ok and vis or false
+    if ok and type(vis) == "boolean" then return vis end
+    local ok2, vis2 = pcall(function() return api.Win.Visible end)
+    if ok2 and type(vis2) == "boolean" then return vis2 end
+    return false
   end
 
   -- --------------------------------------------------------------------------
@@ -513,12 +574,14 @@ return function(api)
               local d = (meHRP.Position - hrp.Position).Magnitude
               if d ~= d or d > F.esp_range then hideRig(e) return end
               nP = nP + 1
-              -- glow FIRST (presence beats decoration)
+              -- glow FIRST (presence beats decoration, and it must keep
+              -- working even when the drawing side is switched off)
               if F.glow_on then
                 local key = "p_" .. ch:GetDebugId()
                 setGlow(ch, F.glow_enemy, true, "p")
                 seenGlow[key] = true
               end
+              if not F.esp_on then hideRig(e) return end
               local cf, size = boxOf(ch)
               if not (cf and size) then hideRig(e) return end
               local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
@@ -593,30 +656,40 @@ return function(api)
               if e.trace.Visible then
                 e.trace.Color = col
                 e.trace.Thickness = 1
-                e.trace.Transparency = 0.6
+                e.trace.Transparency = 0.7
                 e.trace.From = V2(vs.X / 2, vs.Y)
                 e.trace.To = V2(cx, y0 + h)
               end
-              local showNm = F.esp_name or F.esp_dist
-              e.name.Visible = showNm
-              if showNm then
-                local parts = {}
-                if F.esp_name then table.insert(parts, pl.Name) end
-                if F.esp_dist then table.insert(parts, dm) end
-                e.name.Text = table.concat(parts, "  ")
+              -- name above the box, distance under it, weapon under that:
+              -- one Text object each, so toggling one never blanks another
+              e.name.Visible = F.esp_name == true
+              if e.name.Visible then
+                e.name.Text = pl.DisplayName ~= pl.Name
+                  and (pl.DisplayName .. " (@" .. pl.Name .. ")") or pl.Name
                 e.name.Color = col
-                e.name.Position = V2(cx, y0 - 16)
+                e.name.Position = V2(cx, y0 - 17)
+              end
+              local wy = y0 + h + 3
+              e.dist.Visible = F.esp_dist == true
+              if e.dist.Visible then
+                e.dist.Text = dm
+                e.dist.Color = col
+                e.dist.Position = V2(cx, wy)
+                wy = wy + 14
               end
               local g = F.esp_weapon and gunName(ch) or nil
               e.weapon.Visible = g ~= nil
               if g then
                 e.weapon.Text = g
-                e.weapon.Color = Color3.new(1, 1, 1)
-                e.weapon.Position = V2(cx, y0 + h + 3)
+                e.weapon.Color = Color3.fromRGB(235, 235, 245)
+                e.weapon.Position = V2(cx, wy)
               end
             end)
           end
         end
+      else
+        -- no local character (dead / loading): rigs must not freeze on screen
+        for _, e in pairs(pesc) do hideRig(e) end
       end
 
       -- npc (traders/bosses)
@@ -626,8 +699,14 @@ return function(api)
             local m = npc.model
             local L = npc.lbl
             if L then L.Visible = false end
-            if m and m.Parent and npc.hum.Health > 0 then
-              local d = (meHRP.Position - npc.hrp.Position).Magnitude
+            local hum = npc.hum
+            if hum and not hum.Parent then hum = m and m:FindFirstChildOfClass("Humanoid") end
+            local hrp = npc.hrp
+            if hrp and not hrp.Parent then hrp = m and m:FindFirstChild("HumanoidRootPart") end
+            -- a destroyed Humanoid used to throw here and kill the whole
+            -- NPC pass for that frame
+            if m and m.Parent and hum and hrp and hum.Health > 0 then
+              local d = (meHRP.Position - hrp.Position).Magnitude
               if d == d and d <= F.npc_range then
                 local cf, size = boxOf(m)
                 if cf and size then
@@ -648,6 +727,10 @@ return function(api)
             end
           end
         end)
+      else
+        for _, o in pairs(npcMap) do
+          if o.lbl then pcall(function() o.lbl.Visible = false end) end
+        end
       end
 
       -- corpses
@@ -677,18 +760,19 @@ return function(api)
           end
         end)
       else
-        for _, c in ipairs(corpseCache) do
-          if c.lbl then c.lbl.Visible = false end
+        for _, o in pairs(corpseMap) do
+          if o.lbl then pcall(function() o.lbl.Visible = false end) end
         end
       end
       if F.glow_corpse and meHRP then
         guarded("corpseGlow", function()
           for _, c in ipairs(corpseCache) do
             if c.pos and (meHRP.Position - c.pos).Magnitude <= F.corpse_range then
-              local m = workspace:FindFirstChild(c.name)
-              local hum = m and m:FindFirstChildOfClass("Humanoid")
-              -- re-validate: the name may be reused by a respawned live body
-              if m and m:IsA("Model") and hum and hum.Health <= 0 then
+              -- use the cached instance: FindFirstChild(name) could grab a
+              -- respawned LIVE body that reused the same name
+              local m = c.m
+              local hum = m and m.Parent and m:FindFirstChildOfClass("Humanoid")
+              if m and m.Parent and m:IsA("Model") and hum and hum.Health <= 0 then
                 local key = "c_" .. m:GetDebugId()
                 setGlow(m, c.isPlayer and F.glow_corpse_c or F.corpse_ai_col, true, "c")
                 seenGlow[key] = true
@@ -704,9 +788,12 @@ return function(api)
           for _, it in ipairs(lootCache) do
             local L = it.lbl
             if L then L.Visible = false end
-            local want = (it.kind == "drop" and F.loot_drop)
-              or (it.kind == "quest" and F.loot_quest)
-              or (F.loot_cont) -- cont + spawn
+            -- explicit dispatch: the old `or F.loot_cont` fallback meant
+            -- unchecking Dropped/Quest did nothing while Containers was on
+            local want
+            if it.kind == "drop" then want = F.loot_drop == true
+            elseif it.kind == "quest" then want = F.loot_quest == true
+            else want = F.loot_cont == true end -- cont + spawn
             if want and it.pos and L then
               local d = (meHRP.Position - it.pos).Magnitude
               if d == d and d <= F.loot_range then
@@ -726,8 +813,8 @@ return function(api)
           end
         end)
       else
-        for _, it in ipairs(lootCache) do
-          if it.lbl then it.lbl.Visible = false end
+        for _, o in pairs(lootMap) do
+          if o.lbl then pcall(function() o.lbl.Visible = false end) end
         end
       end
 
@@ -742,7 +829,7 @@ return function(api)
               if d == d and d <= F.exit_range then
                 local sp, on = wts(e.pos)
                 if on then
-                  L.Text = "EXIT  " .. math.floor(d + 0.5) .. "m"
+                  L.Text = "EXIT " .. tostring(e.name) .. "  " .. math.floor(d + 0.5) .. "m"
                   L.Color = F.exit_col
                   L.Position = V2(sp.X, sp.Y)
                   L.Visible = true
@@ -752,8 +839,8 @@ return function(api)
           end
         end)
       else
-        for _, e in ipairs(exitCache) do
-          if e.lbl then e.lbl.Visible = false end
+        for _, o in pairs(exitMap) do
+          if o.lbl then pcall(function() o.lbl.Visible = false end) end
         end
       end
 
@@ -763,38 +850,56 @@ return function(api)
           local size = F.radar_size or 170
           local pos = V2(vs.X - size - 16, vs.Y - size - 16)
           local bg = tshape("Square")
-          bg.Color = { R = 0.06, G = 0.06, B = 0.1 }; bg.Thickness = 1
+          -- Drawing.Color needs a Color3. The old {R=,G=,B=} tables threw,
+          -- and the throw took the rest of the frame with it.
+          bg.Color = Color3.fromRGB(15, 15, 26)
+          bg.Filled = true; bg.Transparency = 0.55; bg.Thickness = 1
           bg.Size = V2(size, size); bg.Position = V2(pos.X, pos.Y)
           local bd = tshape("Square")
-          bd.Color = { R = 0.25, G = 0.55, B = 0.7 }; bd.Thickness = 1; bd.Filled = false
+          bd.Color = Color3.fromRGB(64, 140, 179)
+          bd.Filled = false; bd.Transparency = 1; bd.Thickness = 1
           bd.Size = V2(size, size); bd.Position = V2(pos.X, pos.Y)
-          local fwd, right = camera.CFrame.LookVector, camera.CFrame.RightVector
+          -- flatten the camera basis onto XZ: with a pitched camera the raw
+          -- LookVector squashed the blips toward the centre
+          local look = camera.CFrame.LookVector
+          local fwd = Vector3.new(look.X, 0, look.Z)
+          fwd = (fwd.Magnitude > 1e-4) and fwd.Unit or Vector3.new(0, 0, -1)
+          local right = fwd:Cross(Vector3.new(0, 1, 0))
+          local range = math.max(F.radar_range or 800, 1)
+          local sc = (size / 2 - 4) / range
           local function dot(worldPos, col, s)
             local rel = worldPos - meHRP.Position
             local dx, dz = rel:Dot(right), rel:Dot(fwd)
             if dx ~= dx or dz ~= dz then return end
-            if math.sqrt(dx * dx + dz * dz) > F.radar_range then return end
-            local sc = (size / 2 - 4) / F.radar_range
+            if math.sqrt(dx * dx + dz * dz) > range then return end
             local p = tshape("Square")
-            p.Color = col; p.Thickness = 1
+            p.Color = col; p.Filled = true; p.Transparency = 1; p.Thickness = 1
             p.Size = V2(s, s)
-            p.Position = V2(pos.X + size / 2 + dx * sc - s / 2, pos.Y + size / 2 + dz * sc - s / 2)
+            -- minus dz: what is in FRONT of you belongs at the TOP
+            p.Position = V2(pos.X + size / 2 + dx * sc - s / 2,
+                            pos.Y + size / 2 - dz * sc - s / 2)
           end
+          local self3 = tshape("Square")
+          self3.Color = Color3.fromRGB(120, 220, 255)
+          self3.Filled = true; self3.Transparency = 1; self3.Thickness = 1
+          self3.Size = V2(4, 4)
+          self3.Position = V2(pos.X + size / 2 - 2, pos.Y + size / 2 - 2)
           for _, pl in ipairs(players:GetPlayers()) do
             if pl ~= LP then
               local ch = pl.Character
+              if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
               local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
               local hum = ch and ch:FindFirstChildOfClass("Humanoid")
               if hrp and hum and hum.Health > 0 then
-                dot(hrp.Position, { R = 1, G = 0.35, B = 0.35 }, 3)
+                dot(hrp.Position, Color3.fromRGB(255, 90, 90), 4)
               end
             end
           end
           for _, c in ipairs(corpseCache) do
-            if c.pos then dot(c.pos, { R = 1, G = 0.6, B = 0.15 }, 2) end
+            if c.pos then dot(c.pos, Color3.fromRGB(255, 153, 38), 2) end
           end
           for _, e in ipairs(exitCache) do
-            if e.pos then dot(e.pos, { R = 0.4, G = 0.9, B = 0.5 }, 3) end
+            if e.pos then dot(e.pos, Color3.fromRGB(102, 230, 128), 3) end
           end
         end)
       end
@@ -838,7 +943,7 @@ return function(api)
                 or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
                 or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))) then
               local alpha = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
-              camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha, true)
+              camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha)
               aimOn = true
             end
           else
@@ -847,21 +952,36 @@ return function(api)
         end)
       end
 
-      -- fov circle
-      if F.aim_circle then
-        local c = tshape("Circle")
-        c.Color = { R = 0.2, G = 0.8, B = 1 }; c.Transparency = 0.5
-        c.Thickness = 1; c.NumSides = 48
-        c.Radius = math.abs(fin(math.tan(math.rad(clamp(F.aim_fov or 15, 5, 90))) * vs.Y * 0.5, 10))
-        c.Position = V2(vs.X / 2, vs.Y / 2)
-      end
-      if aimOn then
-        local dotm = tshape("Square")
-        dotm.Color = { R = 1, G = 0.3, B = 0.3 }; dotm.Thickness = 2
-        dotm.Size = V2(7, 7)
-        dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
-        dotm.Transparency = 0
-      end
+      -- fov circle + lock dot
+      -- NOTE: this block used to be unguarded AND used {R=,G=,B=} tables.
+      -- aim_circle defaults to true, so it threw on EVERY frame and aborted
+      -- the rest of the handler - gcGlow and the status labels never ran.
+      guarded("hud", function()
+        if F.aim_circle then
+          local c = tshape("Circle")
+          c.Color = Color3.fromRGB(51, 204, 255)
+          c.Transparency = 0.6
+          c.Filled = false
+          c.Thickness = 1
+          c.NumSides = 64
+          -- match the actual cone: screen radius depends on the camera FOV,
+          -- not on the aim angle alone
+          local camFov = math.rad(clamp(camera.FieldOfView or 70, 1, 120))
+          local r = math.tan(math.rad(clamp(F.aim_fov or 15, 1, 89)))
+            / math.max(math.tan(camFov / 2), 1e-4) * (vs.Y / 2)
+          c.Radius = math.abs(fin(r, 40))
+          c.Position = V2(vs.X / 2, vs.Y / 2)
+        end
+        if aimOn then
+          local dotm = tshape("Square")
+          dotm.Color = Color3.fromRGB(255, 77, 77)
+          dotm.Filled = true
+          dotm.Transparency = 1 -- was 0 = invisible
+          dotm.Thickness = 2
+          dotm.Size = V2(7, 7)
+          dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
+        end
+      end)
 
       gcGlow(seenGlow)
 
@@ -871,7 +991,7 @@ return function(api)
           statLbl.Set(("players %d - bodies %d - loot %d%s"):format(
             nP, nC, nL, aimOn and " - LOCK" or ""))
           local parts = { ("loop %dfps"):format(dbg.fps) }
-          for _, sec in ipairs({ "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim" }) do
+          for _, sec in ipairs({ "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim", "hud" }) do
             if dbg.err[sec] then
               table.insert(parts, sec .. "!" .. dbg.err[sec])
             end
@@ -910,6 +1030,10 @@ return function(api)
 
   local pSec = Tab:Section({ Name = "Players" })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
+  if not HAS_DRAWING then
+    pSec:Paragraph("WARNING: this executor has no Drawing API. Boxes, names, distance, tracers and the radar cannot render. Glow (Highlight) still works.")
+  end
+  flagToggle(pSec, "ESP enabled", "esp_on", "Master switch for every player drawing")
   flagToggle(pSec, "Boxes", "esp_box")
   flagToggle(pSec, "Health bar", "esp_health")
   flagToggle(pSec, "Tracers", "esp_tracer")
@@ -984,6 +1108,41 @@ return function(api)
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
   dbgLbl = aboutSec:Label("loop - fps")
+  aboutSec:Button({ Name = "Text self-test", Variant = "ghost",
+    Tooltip = "Draws 6 sample texts center-screen for 6s. Tell which rows you SEE.",
+    Callback = function()
+      task.spawn(function()
+        local vs = camera.ViewportSize
+        local cx, cy = vs.X / 2, vs.Y / 2 - 120
+        local rows = {
+          { "1 font0 outline", 0, true, 14 },
+          { "2 font1 outline", 1, true, 14 },
+          { "3 font2 plain", 2, false, 14 },
+          { "4 font3 plain", 3, false, 14 },
+          { "5 no-outline big", 1, false, 20 },
+          { "6 font0 big outline", 0, true, 20 },
+        }
+        local objs = {}
+        for i, r in ipairs(rows) do
+          local ok, t = pcall(function()
+            local x = Drawing.new("Text")
+            x.Center = true
+            x.Outline = r[3]
+            x.Transparency = 1 -- 1 = solid in the Drawing API
+            x.Font = r[2]
+            x.Size = r[4]
+            x.Color = Color3.new(0, 1, 0)
+            x.Text = r[1]
+            x.Position = Vector2.new(cx, cy + (i - 1) * 30)
+            x.Visible = true
+            return x
+          end)
+          if ok and t then table.insert(objs, t) end
+        end
+        task.wait(6)
+        for _, t in ipairs(objs) do pcall(function() t:Remove() end) end
+      end)
+    end })
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
   end })
@@ -993,7 +1152,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   unloadModule = function()
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
-    clearTransient()
+    freeTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
@@ -1007,6 +1166,7 @@ return function(api)
     if g then
       if g.__HUMA_PLACE and g.__HUMA_PLACE.Unload == unloadModule then g.__HUMA_PLACE = nil end
       if g.__HUMA_DELTA and g.__HUMA_DELTA.Unload == unloadModule then g.__HUMA_DELTA = nil end
+      g.__HUMA_DELTA_DBG = nil
     end
     Notify("Delta", "Module unloaded", "info")
   end
@@ -1020,12 +1180,21 @@ return function(api)
     getgenv().__HUMA_DELTA_DBG = function()
       local ok, snap = pcall(function()
         local rigs, labels = 0, 0
-        local visBox, visName, visTrace = 0, 0, 0
+        local visBox, visName, visDist, visWpn, visTrace = 0, 0, 0, 0, 0
+        local sampleName, sampleAlpha
         for _, e in pairs(pesc) do
           rigs = rigs + 1
           pcall(function() if e.box.Visible then visBox = visBox + 1 end end)
           pcall(function() if e.name.Visible then visName = visName + 1 end end)
+          pcall(function() if e.dist.Visible then visDist = visDist + 1 end end)
+          pcall(function() if e.weapon.Visible then visWpn = visWpn + 1 end end)
           pcall(function() if e.trace.Visible then visTrace = visTrace + 1 end end)
+          pcall(function()
+            if e.name.Visible and not sampleName then
+              sampleName = tostring(e.name.Text)
+              sampleAlpha = e.name.Transparency
+            end
+          end)
         end
         for _, mp in ipairs({ lootMap, corpseMap, npcMap, exitMap }) do
           for _ in pairs(mp) do labels = labels + 1 end
@@ -1034,10 +1203,15 @@ return function(api)
           ver = MODULE_VERSION,
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
+          drawing = HAS_DRAWING,
           objs = { rigs = rigs, labels = labels },
-          shown = { box = visBox, name = visName, trace = visTrace },
+          shown = { box = visBox, name = visName, dist = visDist,
+                    weapon = visWpn, trace = visTrace },
+          -- sampleAlpha must be 1. If it reads 0 the text is transparent.
+          sample = { text = sampleName, alpha = sampleAlpha },
           flags = {
             box = F.esp_box, hp = F.esp_health, tracer = F.esp_tracer,
+            on = F.esp_on,
             name = F.esp_name, dist = F.esp_dist, weapon = F.esp_weapon,
             glow = F.glow_on, range = F.esp_range, thick = F.esp_thick,
           },
@@ -1048,6 +1222,9 @@ return function(api)
     end
   end) end
 
+  if not HAS_DRAWING then
+    Notify("Delta", "No Drawing API in this executor - only glow will render", "warn")
+  end
   Notify("Delta", "Loaded v" .. MODULE_VERSION .. " - eyes only, play sane", "ok")
   print("[huma-delta] place module loaded v" .. MODULE_VERSION)
 end
