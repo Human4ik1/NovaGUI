@@ -23,15 +23,51 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.5-fix"
+  local MODULE_VERSION = "2.6-fix"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
   local workspace = game:GetService("Workspace")
   local userInput = game:GetService("UserInputService")
+  local lighting = game:GetService("Lighting")
   local camera = workspace.CurrentCamera
   local LP = players.LocalPlayer
   local rayParams = RaycastParams.new()
+
+  -- fullbright originals (captured on first enable, restored on off/unload)
+  local brightOrig = nil
+  local function brightApply(on)
+    if on then
+      if not brightOrig then
+        brightOrig = {}
+        pcall(function()
+          brightOrig.ClockTime = lighting.ClockTime
+          brightOrig.Brightness = lighting.Brightness
+          brightOrig.FogEnd = lighting.FogEnd
+          brightOrig.GlobalShadows = lighting.GlobalShadows
+          brightOrig.Ambient = lighting.Ambient
+          brightOrig.OutdoorAmbient = lighting.OutdoorAmbient
+        end)
+      end
+      pcall(function()
+        lighting.ClockTime = 14
+        lighting.Brightness = 2
+        lighting.FogEnd = 100000
+        lighting.GlobalShadows = false
+        lighting.Ambient = Color3.fromRGB(170, 170, 170)
+        lighting.OutdoorAmbient = Color3.fromRGB(170, 170, 170)
+      end)
+    elseif brightOrig then
+      pcall(function()
+        if brightOrig.ClockTime ~= nil then lighting.ClockTime = brightOrig.ClockTime end
+        if brightOrig.Brightness ~= nil then lighting.Brightness = brightOrig.Brightness end
+        if brightOrig.FogEnd ~= nil then lighting.FogEnd = brightOrig.FogEnd end
+        if brightOrig.GlobalShadows ~= nil then lighting.GlobalShadows = brightOrig.GlobalShadows end
+        if brightOrig.Ambient ~= nil then lighting.Ambient = brightOrig.Ambient end
+        if brightOrig.OutdoorAmbient ~= nil then lighting.OutdoorAmbient = brightOrig.OutdoorAmbient end
+      end)
+    end
+  end
 
   --// reload safety --------------------------------------------------------
   do
@@ -60,12 +96,17 @@ return function(api)
     glow_drop = Color3.fromRGB(120, 220, 255),
     glow_quest = Color3.fromRGB(190, 120, 255),
     glow_star = Color3.fromRGB(255, 210, 90),
-    glow_lootcap = 30,
+    glow_lootcap = 10,
     loot_cont = true, loot_drop = true, loot_quest = true,
     loot_hl = true, loot_keys = "card,key,defib,ledx,bitcoin,gpu,military, thermal, red, violet, gold",
     loot_col = Color3.fromRGB(120, 220, 255),
     loot_hlcol = Color3.fromRGB(255, 210, 90),
     loot_range = 1500,
+    loot_contname = true,
+    bot_esp = true, bot_col = Color3.fromRGB(255, 140, 50),
+    bot_glow = false, bot_range = 2500,
+    aim_bots = true,
+    fullbright = true,
     corpse_on = true, corpse_ai = true,
     corpse_col = Color3.fromRGB(255, 150, 40),
     corpse_ai_col = Color3.fromRGB(200, 170, 60),
@@ -249,7 +290,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Cached slow scans (loot / corpses / npc / exits) — 2s timer
   -- --------------------------------------------------------------------------
-  local lootCache, corpseCache, npcCache, exitCache = {}, {}, {}, {}
+  local lootCache, corpseCache, npcCache, exitCache, botCache = {}, {}, {}, {}, {}
   local syncLabelMaps -- fwd: defined below scanWorld, runs on ticks
   local function hlKeys()
     local out = {}
@@ -270,7 +311,8 @@ return function(api)
       budget = budget - 1
       if budget <= 0 then budget = SCAN_BUDGET; task.wait() end
     end
-    local loot, corpses, npcs, exits = {}, {}, {}, {}
+    local loot, corpses, npcs, exits, bots = {}, {}, {}, {}, {}
+    local myPos = myHRP() and myHRP().Position or nil
     local keys = hlKeys()
     local function lootKindOf(model, root)
       local p = model
@@ -378,14 +420,54 @@ return function(api)
         end
       end
     end
+    -- hostile bots live nested under AiZones (traders are top-level NPC).
+    -- Faction attribute marks hostiles; dead ones join the corpse list.
+    do
+      local az = workspace:FindFirstChild("AiZones")
+      if az then
+        local ok, desc = pcall(function() return az:GetDescendants() end)
+        for _, v in ipairs(ok and desc or {}) do
+          if v:IsA("Model") then
+            step()
+            local hum = v:FindFirstChildOfClass("Humanoid")
+            if hum then
+              local hrp = v:FindFirstChild("HumanoidRootPart") or v.PrimaryPart
+              if hum.Health > 0 then
+                if hrp then
+                  table.insert(bots, {
+                    model = v, hrp = hrp, hum = hum, name = v.Name,
+                    faction = tostring(v:GetAttribute("Faction") or "?"),
+                  })
+                end
+              else
+                local cf = select(1, boxOf(v))
+                table.insert(corpses, {
+                  pos = cf and cf.Position or (hrp and hrp.Position) or nil,
+                  root = hrp,
+                  name = v.Name, isPlayer = false, m = v,
+                })
+              end
+            end
+          end
+        end
+      end
+    end
+    -- nearest-first: the loot glow budget goes to the closest crates
+    if myPos then
+      table.sort(loot, function(a, b)
+        local da = a.pos and (a.pos - myPos).Magnitude or 1e9
+        local db = b.pos and (b.pos - myPos).Magnitude or 1e9
+        return da < db
+      end)
+    end
     if moduleDead then return end
-    lootCache, corpseCache, npcCache, exitCache = loot, corpses, npcs, exits
+    lootCache, corpseCache, npcCache, exitCache, botCache = loot, corpses, npcs, exits, bots
     syncLabelMaps()
   end
 
   -- persistent label objects (zero per-frame allocation): created on
   -- discovery during scans, updated per frame, destroyed when gone
-  local lootMap, corpseMap, npcMap, exitMap = {}, {}, {}, {}
+  local lootMap, corpseMap, npcMap, exitMap, botMap = {}, {}, {}, {}, {}
   local function mkLabel(size)
     local t = shape("Text")
     pcall(function()
@@ -398,7 +480,7 @@ return function(api)
   end
   local function killDraw(o) pcall(function() o:Remove() end) end
   function syncLabelMaps()
-    local seenL, seenC, seenN, seenE = {}, {}, {}, {}
+    local seenL, seenC, seenN, seenE, seenB = {}, {}, {}, {}, {}
     for _, it in ipairs(lootCache) do
       local m = it.m
       if m and m.Parent then
@@ -439,10 +521,21 @@ return function(api)
         e.lbl = nil
       end
     end
+    for _, b in ipairs(botCache) do
+      local m = b.model
+      if m and m.Parent then
+        seenB[m] = true
+        if not botMap[m] then botMap[m] = { lbl = mkLabel(13) } end
+        b.lbl = botMap[m].lbl
+      else
+        b.lbl = nil
+      end
+    end
     for m, o in pairs(lootMap) do if not seenL[m] then killDraw(o.lbl) lootMap[m] = nil end end
     for m, o in pairs(corpseMap) do if not seenC[m] then killDraw(o.lbl) corpseMap[m] = nil end end
     for m, o in pairs(npcMap) do if not seenN[m] then killDraw(o.lbl) npcMap[m] = nil end end
     for p, o in pairs(exitMap) do if not seenE[p] then killDraw(o.lbl) exitMap[p] = nil end end
+    for m, o in pairs(botMap) do if not seenB[m] then killDraw(o.lbl) botMap[m] = nil end end
   end
 
   -- --------------------------------------------------------------------------
@@ -451,10 +544,15 @@ return function(api)
   local glowMap = {}
   -- Roblox stops rendering Highlights past ~31 live instances: past the cap
   -- new ones silently do nothing, which looks exactly like a broken glow.
-  -- Budget them per frame so the closest targets always get one.
-  local GLOW_CAP = 24
-  local glowUsed = 0
-  local function setGlow(model, col, on, tag)
+  -- TWO independent pools, not one shared counter: players/bots/npc/corpses
+  -- were processed before loot every frame, so on any populated server they
+  -- filled the whole shared cap and loot glow silently got zero, forever,
+  -- regardless of F.glow_lootcap. Entities and loot now each guarantee a
+  -- minimum; 20 + 10 = 30 stays under the engine's render ceiling.
+  local GLOW_ENTITY_CAP = 20
+  local GLOW_LOOT_CAP = 10
+  local glowUsedEntity, glowUsedLoot = 0, 0
+  local function setGlow(model, col, on, tag, pool)
     if not model or not model.Parent then return end
     local key = tostring(tag) .. "_" .. model:GetDebugId()
     local prev = glowMap[key]
@@ -463,10 +561,12 @@ return function(api)
       glowMap[key] = nil
       return
     end
+    local isLoot = pool == "loot"
     if prev and prev.Parent then
       -- refresh live props so the Through-walls / colour toggles apply to
       -- highlights that already exist (they used to be frozen at creation)
-      glowUsed = glowUsed + 1
+      if isLoot then glowUsedLoot = glowUsedLoot + 1
+      else glowUsedEntity = glowUsedEntity + 1 end
       pcall(function()
         if prev.FillColor ~= col then prev.FillColor = col end
         prev.DepthMode = F.glow_top and Enum.HighlightDepthMode.AlwaysOnTop
@@ -474,8 +574,13 @@ return function(api)
       end)
       return
     end
-    if glowUsed >= GLOW_CAP then return end
-    glowUsed = glowUsed + 1
+    if isLoot then
+      if glowUsedLoot >= GLOW_LOOT_CAP then return end
+      glowUsedLoot = glowUsedLoot + 1
+    else
+      if glowUsedEntity >= GLOW_ENTITY_CAP then return end
+      glowUsedEntity = glowUsedEntity + 1
+    end
     local ok, hl = pcall(function()
       local h = Instance.new("Highlight")
       h.Name = "BodyFX"
@@ -602,7 +707,7 @@ return function(api)
   -- Status line
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
-  local statTick, nP, nC, nL = 0, 0, 0, 0
+  local statTick, nP, nC, nL, nB = 0, 0, 0, 0, 0
 
   -- --------------------------------------------------------------------------
   -- Main loop (silent by design: uncaught per-frame errors are observable)
@@ -623,8 +728,8 @@ return function(api)
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
       local seenGlow = {}
-      local glowBudget = F.glow_lootcap or 30 -- loot highlights cap/frame
-      nP, nC, nL = 0, 0, 0
+      glowUsedEntity, glowUsedLoot = 0, 0 -- per-frame budget reset, both pools
+      nP, nC, nL, nB = 0, 0, 0, 0
 
       -- players (persistent rigs: props updated, hidden when invalid)
       if meHRP then
@@ -762,6 +867,42 @@ return function(api)
         for _, e in pairs(pesc) do hideRig(e) end
       end
 
+      -- bots (hostile AI from AiZones — NOT the same as trader NPCs)
+      if F.bot_esp and meHRP then
+        guarded("bots", function()
+          for _, b in ipairs(botCache) do
+            local m = b.model
+            local L = b.lbl
+            if L then L.Visible = false end
+            if m and m.Parent and b.hum.Health > 0 and L then
+              local d = (meHRP.Position - b.hrp.Position).Magnitude
+              if d == d and d <= F.bot_range then
+                nB = nB + 1
+                local cf, size = boxOf(m)
+                if cf and size then
+                  local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
+                  if tOn and onScreenPt(t2, vs) then
+                    L.Text = b.name .. "  " .. math.floor(d + 0.5) .. "m"
+                    L.Color = F.bot_col
+                    L.Position = V2(t2.X, t2.Y - 8)
+                    L.Visible = true
+                  end
+                end
+                if F.bot_glow then
+                  local key = "b_" .. m:GetDebugId()
+                  setGlow(m, F.bot_col, true, "b")
+                  seenGlow[key] = true
+                end
+              end
+            end
+          end
+        end)
+      else
+        for _, b in ipairs(botCache) do
+          if b.lbl then b.lbl.Visible = false end
+        end
+      end
+
       -- npc (traders/bosses)
       if F.npc_on and meHRP then
         guarded("npc", function()
@@ -875,7 +1016,9 @@ return function(api)
               if d == d and d <= F.loot_range then
                 nL = nL + 1
                 local sp, on = wts(it.pos)
-                if on and onScreenPt(sp, vs) then
+                -- container crates can hide their name while keeping the glow
+                local nameOk = (it.kind ~= "cont" and it.kind ~= "spawn") or F.loot_contname
+                if on and nameOk and onScreenPt(sp, vs) then
                   local col = it.star and F.loot_hlcol or F.loot_col
                   local nm = (it.star and "* " or "") .. it.name
                   L.Text = nm .. "  " .. math.floor(d + 0.5) .. "m"
@@ -884,14 +1027,18 @@ return function(api)
                   L.Position = V2(sp.X, sp.Y)
                   L.Visible = true
                 end
-                if F.glow_loot and glowBudget > 0 and it.m and it.m.Parent then
+                -- lootCache is sorted nearest-first (see scanWorld), so
+                -- stopping once the loot pool is full still glows the
+                -- closest crates, not an arbitrary subset
+                local lootCap = clamp(math.floor(F.glow_lootcap or GLOW_LOOT_CAP), 1, GLOW_LOOT_CAP)
+                if F.glow_loot and glowUsedLoot < lootCap
+                  and it.m and it.m.Parent then
                   local gc = it.star and F.glow_star
                     or (it.kind == "drop" and F.glow_drop
                       or (it.kind == "quest" and F.glow_quest or F.glow_cont))
                   local key = "l_" .. it.m:GetDebugId()
-                  setGlow(it.m, gc, true, "l")
+                  setGlow(it.m, gc, true, "l", "loot")
                   seenGlow[key] = true
-                  glowBudget = glowBudget - 1
                 end
               end
             end
@@ -1024,6 +1171,28 @@ return function(api)
               end
             end
           end
+          -- hostile bots use the same cone/range/visibility rules as players
+          if F.aim_bots then
+            for _, b in ipairs(botCache) do
+              local m = b.model
+              if m and m.Parent and b.hum.Health > 0 then
+                local ap = aimPoint(m, F.aim_part)
+                if ap then
+                  local dir = ap - origin
+                  local len = dir.Magnitude
+                  if len == len and len > 1 and len <= maxR then
+                    local ang = math.acos(clamp(look:Dot(dir / len), -1, 1))
+                    if ang == ang and ang < cap and isVisible(origin, ap, m) then
+                      local score = (F.aim_prio == "distance") and len or ang
+                      if score < bestScore then
+                        bestScore = score; best = ap; bestPl = m
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
           if best then
             -- the delay is per TARGET, not per position. Tracking a position
             -- meant a running target kept re-arming the delay and the lock
@@ -1086,9 +1255,10 @@ return function(api)
 
       if statLbl and now - statTick > 2 then
         statTick = now
+        if F.fullbright then brightApply(true) end -- re-assert daylight
         pcall(function()
-          statLbl.Set(("players %d - bodies %d - loot %d%s"):format(
-            nP, nC, nL, aimOn and " - LOCK" or ""))
+          statLbl.Set(("players %d - bots %d - bodies %d - loot %d%s"):format(
+            nP, nB, nC, nL, aimOn and " - LOCK" or ""))
           local parts = { ("loop %dfps"):format(dbg.fps) }
           for _, sec in ipairs({ "scan", "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim", "hud" }) do
             if dbg.err[sec] then
@@ -1171,7 +1341,9 @@ return function(api)
   flagColor(gSec, "NPC glow", "glow_npc_c")
   flagColor(gSec, "Corpse glow", "glow_corpse_c")
   flagToggle(gSec, "Loot glow", "glow_loot",
-    "Highlight crates, dropped and quest items (capped per frame)")
+    "Highlight crates, dropped and quest items - nearest first")
+  flagSlider(gSec, "Loot glow slots", "glow_lootcap", 1, 10,
+    { tip = "Max simultaneous loot highlights (engine caps total highlights ~30)" })
   flagColor(gSec, "Crate glow", "glow_cont")
   flagColor(gSec, "Dropped glow", "glow_drop")
   flagColor(gSec, "Quest glow", "glow_quest")
@@ -1183,6 +1355,8 @@ return function(api)
   flagToggle(lSec, "Dropped items", "loot_drop")
   flagToggle(lSec, "Quest items", "loot_quest")
   flagToggle(lSec, "Keyword star", "loot_hl")
+  flagToggle(lSec, "Container names", "loot_contname",
+    "Hide crate names but keep their glow")
   lSec:TextBox({ Name = "Keywords", Placeholder = "card,key,defib,…", Default = F.loot_keys,
     Tooltip = "Comma-separated, case-insensitive", Flag = "pd_loot_keys",
     Callback = function(v) F.loot_keys = tostring(v or "") end })
@@ -1199,6 +1373,21 @@ return function(api)
   flagColor(bSec, "AI body", "corpse_ai_col")
 
   local wSec = Tab:Section({ Name = "World" })
+  wSec:Toggle({ Name = "Fullbright", Desc = "Always daylight, no dark corners",
+    Default = F.fullbright == true, Flag = "pd_fullbright",
+    Tooltip = "Restores raid lighting on off/unload",
+    Callback = function(v)
+      F.fullbright = v == true
+      brightApply(F.fullbright)
+    end })
+  wSec:Paragraph("Bots are hostile AI (Faction). Traders are friendly NPC.")
+  local botSec = Tab:Section({ Name = "Bots" })
+  botSec:Paragraph("Hostile AI from AiZones (Bandits etc.) — separate from trader NPC.")
+  flagToggle(botSec, "Bot ESP", "bot_esp")
+  flagToggle(botSec, "Bot glow", "bot_glow")
+  flagToggle(botSec, "Aim bots", "aim_bots")
+  flagSlider(botSec, "Max distance", "bot_range", 200, 4000, { suf = "m" })
+  flagColor(botSec, "Bot color", "bot_col")
   flagToggle(wSec, "NPC (traders/bosses)", "npc_on")
   flagSlider(wSec, "NPC distance", "npc_range", 200, 4000, { suf = "m" })
   flagColor(wSec, "NPC color", "npc_col")
@@ -1260,11 +1449,12 @@ return function(api)
     if moduleDead then return end -- hub + About button can both call this
     moduleDead = true
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
+    brightApply(false) -- restore raid lighting
     freeTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
-    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap }) do
+    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap }) do
       for m, o in pairs(maps) do
         if o.lbl then pcall(function() o.lbl:Remove() end) end
         maps[m] = nil
@@ -1287,6 +1477,7 @@ return function(api)
       while t < 2 and not moduleDead do t = t + task.wait(0.25) end
     end
   end)
+  if F.fullbright then brightApply(true) end
 
   local hub = { Unload = unloadModule }
   if getgenv then pcall(function()
@@ -1318,9 +1509,10 @@ return function(api)
         return {
           ver = MODULE_VERSION,
           fps = dbg.fps, err = dbg.err, last = dbg.last,
-          counts = { nP = nP, nC = nC, nL = nL },
+          counts = { nP = nP, nC = nC, nL = nL, nB = nB },
           drawing = HAS_DRAWING,
-          glowUsed = glowUsed, glowCap = GLOW_CAP,
+          glow = { entity = glowUsedEntity, entityCap = GLOW_ENTITY_CAP,
+                   loot = glowUsedLoot, lootCap = GLOW_LOOT_CAP },
           objs = { rigs = rigs, labels = labels },
           shown = { box = visBox, name = visName, dist = visDist,
                     weapon = visWpn, trace = visTrace },
