@@ -40,7 +40,7 @@ return function(api)
     pcall(function() for _, c in ipairs(old.conns or {}) do c:Disconnect() end end)
   end
   local S = {
-    marker = false, bingo = false, maxProfit = false,
+    marker = false, bingo = false, maxProfit = false, skipBox = true,
     conns = {}, daubs = 0, claims = 0, calls = 0,
     claimTries = {}, claimLast = {}, lastCall = 0, enabledAt = 0,
     seen = {}, -- union of every number observed since enable (event+panel)
@@ -61,6 +61,7 @@ return function(api)
   local ClaimBingo   = Remotes:WaitForChild("ClaimBingo", 10)
   local NumberCalled = Remotes:WaitForChild("NumberCalled", 10)
   local CardsAssigned = Remotes:WaitForChild("CardsAssigned", 10)
+  local OpenBoxEv = Remotes:FindFirstChild("OpenBox")
   local NetNotify = Remotes:FindFirstChild("Notify")
   if not (ClaimBingo and NumberCalled and CardsAssigned) then
     Notify("Bingo", "Missing remotes — wrong place?", "error")
@@ -552,6 +553,34 @@ return function(api)
     end))
   end
 
+  -- CASE SKIP: the server sends the full item the instant a box is opened
+  -- (name/rarity/isNew/seed) and the reel is pure cosmetics. Proven live that
+  -- hiding BoxOpening changes nothing: opens and rewards flow 1:1 while the
+  -- gui is off. So: hide the reel, surface the result instantly.
+  local function applyBoxSkip()
+    pcall(function()
+      local pg = LP:FindFirstChild("PlayerGui")
+      local bo = pg and pg:FindFirstChild("BoxOpening")
+      if bo then bo.Enabled = not S.skipBox end
+    end)
+  end
+  if OpenBoxEv then
+    table.insert(S.conns, OpenBoxEv.OnClientEvent:Connect(function(d)
+      if type(d) ~= "table" or not S.skipBox then return end
+      applyBoxSkip()
+      local nm = tostring(d.name or "?")
+      local rar = tostring(d.rarity or "?")
+      local kind = tostring(d.kind or d.box or "item")
+      kind = kind:sub(1, 1):upper() .. kind:sub(2)
+      local isNew = d.isNew == true
+      local rl = string.lower(rar)
+      local sev = (rl == "legendary" or rl == "mythic" or rl == "epic") and "warn"
+        or (rl == "rare" or rl == "uncommon") and "ok" or "info"
+      Notify("Unboxed " .. kind, nm .. " · " .. rar .. (isNew and " · NEW!" or ""), sev)
+      setStatus(("unboxed: %s · %s%s"):format(nm, rar, isNew and " · NEW!" or ""))
+    end))
+  end
+
   --// anti-AFK + self-healing ticker --------------------------------------
   -- ticker: full sync every 2.5s catches anything events missed (late
   -- enable, manual completions, dropped packets, slow stamps). Gated by
@@ -616,6 +645,16 @@ return function(api)
     end,
   })
   autoSec:Toggle({
+    Name = "Skip case animation", Desc = "Instant result, no unbox scroll",
+    Default = true,
+    Tooltip = "Hides the reel and shows the item immediately. Rewards unaffected (proven live: opens flow 1:1 while hidden).",
+    Callback = function(v)
+      S.skipBox = v == true
+      applyBoxSkip()
+      if S.skipBox then Notify("Bingo", "Case skip ON", "ok") end
+    end,
+  })
+  autoSec:Toggle({
     Name = "Max Profit", Desc = "Hold the claim until ALL cards complete the figure",
     Default = false,
     Tooltip = "Waits for every owned card to win, then claims all at once (bigger payout). Two failsafes still claim early: a rival's claim, or 74+ of 75 numbers out.",
@@ -660,5 +699,6 @@ return function(api)
 
   setStatus("module ready — enable Auto Marker / Bingo")
   refreshStats()
+  applyBoxSkip()
   print("[huma-bingo] place module loaded")
 end
