@@ -458,14 +458,17 @@ return function(api)
 
   local function catchUp()
     task.spawn(function()
-      local total = sync("catchup") or 0
-      setStatus("catch-up: swept " .. total .. " cells (total " .. S.daubs .. ")")
-      refreshStats()
+      pcall(function()
+        local total = sync("catchup") or 0
+        setStatus("catch-up: swept " .. total .. " cells (total " .. S.daubs .. ")")
+        refreshStats()
+      end)
     end)
   end
 
   --// events ---------------------------------------------------------------
   table.insert(S.conns, NumberCalled.OnClientEvent:Connect(function(data)
+    pcall(function()
     S.calls = S.calls + 1
     S.lastCall = os.clock()
     local n = parseNumber(data)
@@ -477,6 +480,7 @@ return function(api)
       setStatus("saw " .. n .. " (board clean, calls " .. S.calls .. ")")
     end
     refreshStats()
+    end)
   end))
 
   table.insert(S.conns, CardsAssigned.OnClientEvent:Connect(function()
