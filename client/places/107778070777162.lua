@@ -657,12 +657,13 @@ end
 -- Cash visual (fake local counter)
 --=====================================================================
 local cashVisual = {
-    label = nil,
-    base  = 0,
-    bonus = 0,
-    shown = 0,
-    ours  = nil,
-    conn  = nil,
+  label = nil,
+  base  = 0,
+  bonus = 0,
+  shown = 0,
+  ours  = nil,
+  conn  = nil,
+  nextScan = 0,
 }
 
 local MULTIPLIERS = { K = 1e3, M = 1e6, B = 1e9, T = 1e12 }
@@ -756,6 +757,7 @@ local function releaseCashLabel()
 
     cashVisual.label = nil
     cashVisual.conn  = nil
+    cashVisual.nextScan = 0
     cashVisual.bonus = 0
     cashVisual.ours  = nil
 end
@@ -770,7 +772,8 @@ track(RunService.Heartbeat:Connect(function(dt)
 
     -- Cash visual
     if CONFIG.CASH_VISUAL then
-        if not (cashVisual.label and cashVisual.label.Parent) then
+        if not (cashVisual.label and cashVisual.label.Parent) and now >= (cashVisual.nextScan or 0) then
+            cashVisual.nextScan = now + 1
             hookCashLabel()
         end
 
