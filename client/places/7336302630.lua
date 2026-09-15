@@ -23,6 +23,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
+  local MODULE_VERSION = "2.1-rig"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -76,27 +77,28 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- Drawing recycle (per-frame)
+  -- Drawing objects: TWO lifecycles, never mixed.
+  --   shape()     = persistent (rigs, labels): lives until explicitly
+  --                 removed (unload/GC). NEVER auto-recycled.
+  --   tshape()    = transient (radar blips, fov circle, lock dot): lives
+  --                 exactly one frame, cleared at the next frame start.
+  -- Mixing them (auto-recycling persistent rigs) deletes the ESP two
+  -- frames after creation — that was the invisible-ESP bug.
   -- --------------------------------------------------------------------------
-  local shapes, prevShapes = {}, {}
+  local transient = {}
   local function shape(typ)
-    local ok, s = pcall(Drawing.new, typ)
-    if not ok then
-      local stub = setmetatable({}, {
-        __index = function() return stub end,
-        __newindex = function() end,
-        __call = function() return stub end,
-      })
-      return stub
-    end
-    shapes[#shapes + 1] = s
+    local s = Drawing.new(typ)
     s.Visible = true
     return s
   end
-  local function frameBegin()
-    for _, s in ipairs(prevShapes) do pcall(function() s:Remove() end) end
-    prevShapes = shapes
-    shapes = {}
+  local function tshape(typ)
+    local s = shape(typ)
+    transient[#transient + 1] = s
+    return s
+  end
+  local function clearTransient()
+    for _, s in ipairs(transient) do pcall(function() s:Remove() end) end
+    transient = {}
   end
 
   -- --------------------------------------------------------------------------
@@ -479,7 +481,7 @@ return function(api)
     pcall(function()
       camera = workspace.CurrentCamera or camera
       if not camera then return end
-      frameBegin()
+      clearTransient()
       local now = os.clock()
       dbg.frames = dbg.frames + 1
       if now - dbg.fpsT >= 1 then
@@ -760,10 +762,10 @@ return function(api)
         guarded("radar", function()
           local size = F.radar_size or 170
           local pos = V2(vs.X - size - 16, vs.Y - size - 16)
-          local bg = shape("Square")
+          local bg = tshape("Square")
           bg.Color = { R = 0.06, G = 0.06, B = 0.1 }; bg.Thickness = 1
           bg.Size = V2(size, size); bg.Position = V2(pos.X, pos.Y)
-          local bd = shape("Square")
+          local bd = tshape("Square")
           bd.Color = { R = 0.25, G = 0.55, B = 0.7 }; bd.Thickness = 1; bd.Filled = false
           bd.Size = V2(size, size); bd.Position = V2(pos.X, pos.Y)
           local fwd, right = camera.CFrame.LookVector, camera.CFrame.RightVector
@@ -773,7 +775,7 @@ return function(api)
             if dx ~= dx or dz ~= dz then return end
             if math.sqrt(dx * dx + dz * dz) > F.radar_range then return end
             local sc = (size / 2 - 4) / F.radar_range
-            local p = shape("Square")
+            local p = tshape("Square")
             p.Color = col; p.Thickness = 1
             p.Size = V2(s, s)
             p.Position = V2(pos.X + size / 2 + dx * sc - s / 2, pos.Y + size / 2 + dz * sc - s / 2)
@@ -847,14 +849,14 @@ return function(api)
 
       -- fov circle
       if F.aim_circle then
-        local c = shape("Circle")
+        local c = tshape("Circle")
         c.Color = { R = 0.2, G = 0.8, B = 1 }; c.Transparency = 0.5
         c.Thickness = 1; c.NumSides = 48
         c.Radius = math.abs(fin(math.tan(math.rad(clamp(F.aim_fov or 15, 5, 90))) * vs.Y * 0.5, 10))
         c.Position = V2(vs.X / 2, vs.Y / 2)
       end
       if aimOn then
-        local dotm = shape("Square")
+        local dotm = tshape("Square")
         dotm.Color = { R = 1, G = 0.3, B = 0.3 }; dotm.Thickness = 2
         dotm.Size = V2(7, 7)
         dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
@@ -978,7 +980,7 @@ return function(api)
   flagSlider(wSec, "Radar size", "radar_size", 100, 320, { suf = "px" })
 
   local aboutSec = Tab:Section({ Name = "About" })
-  aboutSec:Label("PROJECT DELTA - hub module (safe build)")
+  aboutSec:Label("PROJECT DELTA - hub module v" .. MODULE_VERSION .. " (safe build)")
   aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
   dbgLbl = aboutSec:Label("loop - fps")
@@ -991,9 +993,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   unloadModule = function()
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
-    for _, s in ipairs(shapes) do pcall(function() s:Remove() end) end
-    for _, s in ipairs(prevShapes) do pcall(function() s:Remove() end) end
-    shapes, prevShapes = {}, {}
+    clearTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
@@ -1031,6 +1031,7 @@ return function(api)
           for _ in pairs(mp) do labels = labels + 1 end
         end
         return {
+          ver = MODULE_VERSION,
           fps = dbg.fps, err = dbg.err, last = dbg.last,
           counts = { nP = nP, nC = nC, nL = nL },
           objs = { rigs = rigs, labels = labels },
@@ -1047,6 +1048,6 @@ return function(api)
     end
   end) end
 
-  Notify("Delta", "Loaded - eyes only, play sane", "ok")
-  print("[huma-delta] place module loaded")
+  Notify("Delta", "Loaded v" .. MODULE_VERSION .. " - eyes only, play sane", "ok")
+  print("[huma-delta] place module loaded v" .. MODULE_VERSION)
 end
