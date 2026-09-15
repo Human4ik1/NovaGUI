@@ -336,7 +336,7 @@ return function(api)
     end
     local ok, hl = pcall(function()
       local h = Instance.new("Highlight")
-      h.Name = "ESP_Highlight"
+      h.Name = "EdgeFX"
       h.Adornee = character
       h.FillColor = Color3.new(col.R, col.G, col.B)
       h.FillTransparency = 0.1
@@ -392,7 +392,7 @@ return function(api)
   end
 
   local function isVisible(from, to, ignoreChar)
-    if not M.flags.aim_visible_check then return true end
+    if not M.flags.aim_visible_check and not M.flags.legit then return true end
     local ignore = {}
     local me = getChar()
     if me then ignore[#ignore + 1] = me end
@@ -420,7 +420,9 @@ return function(api)
     local byDist = cfg.aim_priority == "distance"
     local best, bestScore = nil, byDist and math.huge or cap
     for _, t in ipairs(collected) do
-      local allowed = t.hos == "enemy" or (t.hos == "friendly" and cfg.aim_friends) or (t.hos == "neutral" and cfg.aim_all)
+      local allowed = t.hos == "enemy"
+        or (not M.flags.legit and ((t.hos == "friendly" and cfg.aim_friends)
+          or (t.hos == "neutral" and cfg.aim_all)))
       if allowed then
         local ap = getAimPoint(t, cfg.aim_part)
         if isVisible(camera.CFrame.Position, ap, t.character) then
@@ -462,10 +464,13 @@ return function(api)
     end
     if not aimState.current then
       aimState.current = pickTarget(cap)
+      aimState.since = os.clock()
     end
 
     if aimState.current then
-      if isRage then
+      if (os.clock() - (aimState.since or 0)) < (cfg.aim_delay or 0) then
+        aimState.active = false -- human reaction delay on new targets
+      elseif isRage then
         aimState.active = true
       else
         local hold = cfg.aim_hold
@@ -503,12 +508,14 @@ return function(api)
   local function encodeShot(origin, direction, seed)
     if type(buffer) ~= "table" or type(buffer.create) ~= "function" then return nil end
     local dir = direction.Unit
-    local b = buffer.create(30)
-    buffer.writeu8(b, 0, 17)
-    buffer.writef32(b, 1, origin.X)
-    buffer.writef32(b, 5, origin.Y)
-    buffer.writef32(b, 9, origin.Z)
-    buffer.writef64(b, 13, os.time())
+  local b = buffer.create(30)
+  buffer.writeu8(b, 0, 17)
+  buffer.writef32(b, 1, origin.X)
+  buffer.writef32(b, 5, origin.Y)
+  buffer.writef32(b, 9, origin.Z)
+  -- fractional monotonic clock: integer-second os.time() stamps quantize
+  -- sub-second bursts to dt=0 (inhuman) and fingerprint forged packets
+  buffer.writef64(b, 13, tick())
     buffer.writeu8(b, 21, 1)
     buffer.writei16(b, 22, clamp(math.floor(dir.X * 32767 + 0.5), -32767, 32767))
     buffer.writei16(b, 24, clamp(math.floor(dir.Y * 32767 + 0.5), -32767, 32767))
@@ -518,7 +525,9 @@ return function(api)
 
   local function fireWeapon()
     local t = os.clock()
-    local cd = 1 / math.max(M.flags.aim_fire_rate or 15, 1)
+    local base = M.flags.aim_fire_rate or 15
+    if M.flags.legit then base = math.min(base, 12) end
+    local cd = 1 / math.max(base, 1)
     if (t - lastFireTime) < cd then return false end
     local ch = getChar()
     local tool = ch and ch:FindFirstChildWhichIsA("Tool")
@@ -571,6 +580,7 @@ return function(api)
   -- Kill All
   -- --------------------------------------------------------------------------
   local function startKillAll()
+    if M.flags.legit then notify("Blocked by Legit Mode") return end
     if killAll.active then return end
     local me = getChar()
     if not me then return end
@@ -658,7 +668,7 @@ return function(api)
       hrp.CFrame = CFrame.lookAt(behindPos, headPos)
     end)
 
-    if killAll.timer > 0.15 then
+    if killAll.timer > (cfg.killall_delay or 0.15) then
       fireWeapon()
     end
   end
@@ -979,6 +989,10 @@ return function(api)
     if not ch then return "no char" end
     local hrp = ch:FindFirstChild("HumanoidRootPart")
     if not hrp then return "no hrp" end
+    if M.flags.legit and (hrp.Position - pos).Magnitude > 300 then
+      notify("Legit: teleport too far (>300st)")
+      return "blocked"
+    end
     local target = pos
     local gy = groundY(pos)
     if gy then
@@ -1029,12 +1043,13 @@ return function(api)
   -- Flags + keybind defs
   -- --------------------------------------------------------------------------
   local defaultFor = {
+    legit = false,
     aim_enabled = false, aim_part = "head", aim_fov = 20, aim_smooth = 45,
     aim_hold = "right", aim_priority = "closest", aim_visible_check = true,
     aim_friends = false, aim_all = false, aim_fov_circle = false, aim_pause_menu = false,
     aim_autofire = false, aim_rage = false, aim_fastzoom = false, aim_zoom_fov = 25,
-    aim_fire_rate = 15, aim_head_off = 0.3,
-    killall_delay = 0.08,
+    aim_fire_rate = 15, aim_head_off = 0.3, aim_delay = 0.08,
+    killall_delay = 0.15,
     esp_box = false, esp_health = false, esp_tracer = false, esp_name = false,
     esp_distance = false, esp_weapon = false, esp_team = false, esp_thickness = 1,
     esp_range = 4000,
@@ -1060,6 +1075,7 @@ return function(api)
   local killToggle, noclipToggle, flyToggle, zoomToggle
   local rageToggle, autoToggle
   local unloadModule
+  local legitGuard -- fwd: returns true (and notifies) when Legit blocks
 
   M.bindDefs = {
     aim = { label = "Aim lock", keyflag = "bind_aim_key", modflag = "bind_aim_mode" },
@@ -1075,6 +1091,11 @@ return function(api)
     noclip = {
       label = "Noclip", keyflag = "bind_noclip_key", modflag = "bind_noclip_mode",
       side = function(on)
+        if on and legitGuard() then
+          M.flags.misc_noclip = false
+          if noclipToggle then noclipToggle.Set(false) end
+          return
+        end
         M.flags.misc_noclip = on
         if on and M.flags.misc_fly then M.flags.misc_fly = false end
         notify(on and "Noclip ON" or "Noclip OFF")
@@ -1085,6 +1106,11 @@ return function(api)
     fly = {
       label = "Fly", keyflag = "bind_fly_key", modflag = "bind_fly_mode",
       side = function(on)
+        if on and legitGuard() then
+          M.flags.misc_fly = false
+          if flyToggle then flyToggle.Set(false) end
+          return
+        end
         M.flags.misc_fly = on
         if on and M.flags.misc_noclip then M.flags.misc_noclip = false end
         notify(on and "Fly ON (WASD + space)" or "Fly OFF")
@@ -1104,6 +1130,10 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Nova UI (replaces the standalone menu)
   -- --------------------------------------------------------------------------
+  legitGuard = function()
+    if M.flags.legit then notify("Blocked by Legit Mode") return true end
+    return false
+  end
   local function flagToggle(sec, name, key, desc, tip)
     return sec:Toggle({ Name = name, Desc = desc, Default = M.flags[key] == true,
       Flag = "cw_" .. key, Tooltip = tip,
@@ -1142,6 +1172,10 @@ return function(api)
   flagDropdown(aimSec, "Aim part", "aim_part", { "head", "neck", "body" })
   flagSlider(aimSec, "FOV deg", "aim_fov", 5, 60)
   flagSlider(aimSec, "Smoothness", "aim_smooth", 1, 100)
+  aimSec:Slider({ Name = "Target delay", Min = 0, Max = 0.5, Default = M.flags.aim_delay or 0.08,
+    Decimals = 2, Suffix = "s", Flag = "cw_aim_delay",
+    Tooltip = "Human reaction delay before engaging a new target",
+    Callback = function(v) M.flags.aim_delay = tonumber(v) or 0 end })
   flagDropdown(aimSec, "Trigger", "aim_hold", { "right", "left", "always" },
     "Mouse button that engages the lock (plus the Aim lock key gate)")
   flagDropdown(aimSec, "Priority", "aim_priority", { "closest", "distance" })
@@ -1155,9 +1189,15 @@ return function(api)
   local fireSec = Tab:Section({ Name = "Fire" })
   fireSec:Paragraph("Rage (X) locks everything on screen and fires. Needs an equipped firearm.")
   rageToggle = fireSec:Toggle({ Name = "Rage aim (X)", Default = M.flags.aim_rage == true, Flag = "cw_aim_rage",
-    Callback = function(v) M.flags.aim_rage = v == true end })
+    Callback = function(v)
+      if v and legitGuard() then if rageToggle then rageToggle.Set(false) end return end
+      M.flags.aim_rage = v == true
+    end })
   autoToggle = fireSec:Toggle({ Name = "Auto fire (B)", Default = M.flags.aim_autofire == true, Flag = "cw_aim_autofire",
-    Callback = function(v) M.flags.aim_autofire = v == true end })
+    Callback = function(v)
+      if v and legitGuard() then if autoToggle then autoToggle.Set(false) end return end
+      M.flags.aim_autofire = v == true
+    end })
   zoomToggle = fireSec:Toggle({ Name = "Fast zoom (RMB)", Default = M.flags.aim_fastzoom == true, Flag = "cw_aim_fastzoom",
     Callback = function(v) M.flags.aim_fastzoom = v == true end })
   flagSlider(fireSec, "Fire rate", "aim_fire_rate", 5, 30, { suf = "/s" })
@@ -1194,12 +1234,14 @@ return function(api)
   noclipToggle = moveSec:Toggle({ Name = "Noclip (N)", Desc = "Walls, no fall",
     Default = M.flags.misc_noclip == true, Flag = "cw_misc_noclip",
     Callback = function(v)
+      if v and legitGuard() then if noclipToggle then noclipToggle.Set(false) end return end
       M.flags.misc_noclip = v == true
       if v and M.flags.misc_fly then M.flags.misc_fly = false; if flyToggle then flyToggle.Set(false) end end
     end })
   flyToggle = moveSec:Toggle({ Name = "Fly (M)", Desc = "WASD + Space up / Shift down",
     Default = M.flags.misc_fly == true, Flag = "cw_misc_fly",
     Callback = function(v)
+      if v and legitGuard() then if flyToggle then flyToggle.Set(false) end return end
       M.flags.misc_fly = v == true
       if v and M.flags.misc_noclip then M.flags.misc_noclip = false; if noclipToggle then noclipToggle.Set(false) end end
     end })
@@ -1382,11 +1424,12 @@ return function(api)
   killToggle = killSec:Toggle({ Name = "Kill All (G)", Default = false,
     Callback = function(v)
       if v then startKillAll() else stopKillAll() end
+      if killToggle then killToggle.Set(killAll.active, true) end -- silent: no loop
       killStatus.Set(killAll.active and "RUNNING" or "idle")
     end })
-  killSec:Slider({ Name = "Step delay", Min = 0.01, Max = 0.5, Default = M.flags.killall_delay or 0.08,
+  killSec:Slider({ Name = "Step delay", Min = 0.01, Max = 0.5, Default = M.flags.killall_delay or 0.15,
     Decimals = 2, Suffix = "s", Flag = "cw_killall_delay",
-    Callback = function(v) M.flags.killall_delay = tonumber(v) or 0.08 end })
+    Callback = function(v) M.flags.killall_delay = tonumber(v) or 0.15 end })
   local killDD
   local function enemyNames()
     local _, e = playerLists()
@@ -1438,6 +1481,61 @@ return function(api)
       end)
     end })
 
+  -- SAFETY (anti-ban) --
+  local safeSec = Tab:Section({ Name = "Safety" })
+  safeSec:Paragraph("No script is undetectable here: the server sees positions, shots and stats, players report (ReportGui), mods watch live. Biggest risks: mass kills, rage snaps, teleports, impossible fire packets. Legit Mode kills all blatant vectors in one tap — it is safer, not immortal.")
+  safeSec:Toggle({ Name = "Legit Mode", Desc = "One tap clean",
+    Default = false, Flag = "cw_legit",
+    Tooltip = "Forces off rage/autofire/fly/noclip/kill-all, forces visible-check + enemies-only + fire-rate cap + 300st teleport cap. Blocks re-enabling while on.",
+    Callback = function(v)
+      M.flags.legit = v == true
+      if v then
+        M.flags.aim_rage = false
+        M.flags.aim_autofire = false
+        M.flags.misc_fly = false
+        M.flags.misc_noclip = false
+        if killAll.active then stopKillAll() end
+        if rageToggle then rageToggle.Set(false) end
+        if autoToggle then autoToggle.Set(false) end
+        if flyToggle then flyToggle.Set(false) end
+        if noclipToggle then noclipToggle.Set(false) end
+        if killToggle then killToggle.Set(false, true) end
+        killStatus.Set("idle")
+        notify("Legit Mode ON — blatant features off")
+      else
+        notify("Legit Mode OFF")
+      end
+    end })
+  local kdLabel = safeSec:Label("Session K/D: —")
+  local kdBase, kdTick, kdW15, kdW30 = nil, 0, false, false
+  local function numAttr(n)
+    local ok, v = pcall(function()
+      local p = getLocal()
+      return p and p:GetAttribute(n) or nil
+    end)
+    if not ok then return 0 end
+    return tonumber(v) or 0
+  end
+  regConn(runService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - kdTick < 2 then return end
+    kdTick = now
+    local k, d = numAttr("Kills"), numAttr("Deaths")
+    if not kdBase then kdBase = { k = k, d = d } end
+    local sk, sd = k - kdBase.k, d - kdBase.d
+    pcall(function()
+      kdLabel.Set(("Session K/D: %d/%d  (total %d/%d)"):format(sk, sd, k, d))
+    end)
+    if sk >= 15 and not kdW15 then
+      kdW15 = true
+      notify("15 session kills — consider Legit Mode")
+    end
+    if sk >= 30 and not kdW30 then
+      kdW30 = true
+      notify("30 session kills — high report risk, Legit advised")
+    end
+  end))
+
   -- ABOUT --
   local aboutSec = Tab:Section({ Name = "About" })
   aboutSec:Label("COLD WAR · hub module (engine v3)")
@@ -1455,6 +1553,8 @@ return function(api)
     local lastN, lastM = 0, 0
 
     regConn(runService.Heartbeat:Connect(function()
+      -- whole-body guard: uncaught per-frame errors are observable noise
+      pcall(function()
       local t = os.clock()
       local typing = userInput:GetFocusedTextBox() ~= nil
 
@@ -1508,31 +1608,47 @@ return function(api)
         end
         if userInput:IsKeyDown(Enum.KeyCode.X) and (t - lastX) > 0.3 then
           lastX = t
-          M.flags.aim_rage = not M.flags.aim_rage
-          if rageToggle then rageToggle.Set(M.flags.aim_rage) end
-          notify(M.flags.aim_rage and "Rage ON" or "Rage OFF")
+          if not M.flags.aim_rage and legitGuard() then
+            if rageToggle then rageToggle.Set(false) end
+          else
+            M.flags.aim_rage = not M.flags.aim_rage
+            if rageToggle then rageToggle.Set(M.flags.aim_rage) end
+            notify(M.flags.aim_rage and "Rage ON" or "Rage OFF")
+          end
         end
         if userInput:IsKeyDown(Enum.KeyCode.B) and (t - lastB) > 0.3 then
           lastB = t
-          M.flags.aim_autofire = not M.flags.aim_autofire
-          if autoToggle then autoToggle.Set(M.flags.aim_autofire) end
-          notify(M.flags.aim_autofire and "AutoFire ON" or "AutoFire OFF")
+          if not M.flags.aim_autofire and legitGuard() then
+            if autoToggle then autoToggle.Set(false) end
+          else
+            M.flags.aim_autofire = not M.flags.aim_autofire
+            if autoToggle then autoToggle.Set(M.flags.aim_autofire) end
+            notify(M.flags.aim_autofire and "AutoFire ON" or "AutoFire OFF")
+          end
         end
         if userInput:IsKeyDown(Enum.KeyCode.N) and (t - lastN) > 0.3 then
           lastN = t
-          M.flags.misc_noclip = not M.flags.misc_noclip
-          if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_fly = false end
-          if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
-          if flyToggle then flyToggle.Set(M.flags.misc_fly) end
-          notify(M.flags.misc_noclip and "Noclip ON" or "Noclip OFF")
+          if not M.flags.misc_noclip and legitGuard() then
+            if noclipToggle then noclipToggle.Set(false) end
+          else
+            M.flags.misc_noclip = not M.flags.misc_noclip
+            if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_fly = false end
+            if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
+            if flyToggle then flyToggle.Set(M.flags.misc_fly) end
+            notify(M.flags.misc_noclip and "Noclip ON" or "Noclip OFF")
+          end
         end
         if userInput:IsKeyDown(Enum.KeyCode.M) and (t - lastM) > 0.3 then
           lastM = t
-          M.flags.misc_fly = not M.flags.misc_fly
-          if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_noclip = false end
-          if flyToggle then flyToggle.Set(M.flags.misc_fly) end
-          if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
-          notify(M.flags.misc_fly and "Fly ON (WASD + space)" or "Fly OFF")
+          if not M.flags.misc_fly and legitGuard() then
+            if flyToggle then flyToggle.Set(false) end
+          else
+            M.flags.misc_fly = not M.flags.misc_fly
+            if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_noclip = false end
+            if flyToggle then flyToggle.Set(M.flags.misc_fly) end
+            if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
+            notify(M.flags.misc_fly and "Fly ON (WASD + space)" or "Fly OFF")
+          end
         end
       end
 
@@ -1561,6 +1677,7 @@ return function(api)
           userInput.MouseBehavior = Enum.MouseBehavior.Default
         end)
       end
+      end)
     end))
   end
 
