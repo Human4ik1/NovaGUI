@@ -828,20 +828,21 @@ return function(api)
     local rem = getDoorRem()
     if not rem then Notify("Doors", "Door remote not found", "warn"); return end
     task.spawn(function()
+      local door = nearest -- loop var 'entry' dies with the loop; capture it
       local ok, err = pcall(function()
-        local dc = entry.root.CFrame
+        local dc = door.root.CFrame
         local flat = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
         if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, 1) end
         flat = flat.Unit
-        local toPl = root.Position - entry.root.Position
+        local toPl = root.Position - door.root.Position
         local dot = toPl.X * flat.X + toPl.Z * flat.Z
         local side = (dot > 0) and -1 or 1 -- far side from the player
         local depth = 3.5
         pcall(function()
-          local sz = entry.root.Size
+          local sz = door.root.Size
           depth = math.max(sz.X, sz.Z) / 2 + 2
         end)
-        local dp = entry.root.Position
+        local dp = door.root.Position
         local target = Vector3.new(dp.X + flat.X * side * depth, root.Position.Y, dp.Z + flat.Z * side * depth)
         -- step through, face the door, knock from the inside: the first
         -- packet goes out in the SAME frame as the step (before the server
