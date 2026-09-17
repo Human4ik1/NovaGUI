@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.0-forsaken"
+  local MODULE_VERSION = "2.0-forsaken"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -39,6 +39,8 @@ return function(api)
     esp_killercol = Color3.fromRGB(220, 20, 60),
     esp_survcol = Color3.fromRGB(138, 43, 226),
     alert_on = false, alert_range = 200,
+    flow_on = false, stam_on = false,
+    build_col = Color3.fromRGB(255, 80, 0),
     glow_killer = false, glow_surv = false, glow_top = true,
     glow_killercol = Color3.fromRGB(220, 20, 60),
     glow_survcol = Color3.fromRGB(138, 43, 226),
@@ -140,9 +142,30 @@ return function(api)
     return ok
   end
   local function isKiller(plr)
+    -- primary: team folders (Workspace.Players.Killers/Survivors), live
+    -- per match. Fallback: 250+ HP rule (verified: killer runs 2750).
     local ch = charOf(plr)
+    if ch and type(workspace) == "table" and workspace.FindFirstChild then
+      local ps = workspace:FindFirstChild("Players")
+      if ps then
+        local kf = ps:FindFirstChild("Killers")
+        if kf and ch:IsDescendantOf(kf) then return true end
+        local sf = ps:FindFirstChild("Survivors")
+        if sf and ch:IsDescendantOf(sf) then return false end
+      end
+    end
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     return hum and hum.MaxHealth > 250 or false
+  end
+  local function itemHeld(obj)
+    -- carried items (hands/backpack) don't need world ESP
+    for _, plr in ipairs(players:GetPlayers()) do
+      local ch = plr.Character
+      if ch and obj:IsDescendantOf(ch) then return true end
+      local bp = plr:FindFirstChildOfClass("Backpack")
+      if bp and obj:IsDescendantOf(bp) then return true end
+    end
+    return false
   end
   local function characterRect(ch, hrp, vs)
     local head = ch:FindFirstChild("Head")
@@ -349,7 +372,9 @@ return function(api)
               seen[owner] = true
               local okB, cf = pcall(function() return owner:GetBoundingBox() end)
               if okB and cf then
-                gens[#gens + 1] = { m = owner, pos = cf.Position, name = owner.Name }
+                local prog = owner:FindFirstChild("Progress")
+                if not (prog and prog:IsA("NumberValue")) then prog = nil end
+                gens[#gens + 1] = { m = owner, pos = cf.Position, name = owner.Name, prog = prog }
               end
             end
           end
@@ -368,12 +393,12 @@ return function(api)
         end
       end
     end
-    -- workspace-level dropped items (ItemRoot models)
+    -- workspace-level dropped items (ItemRoot models), skipping carried ones
     do
       local ok, desc = pcall(function() return workspace:GetChildren() end)
       if ok then
         for _, v in ipairs(desc) do
-          if v:FindFirstChild("ItemRoot") and not seen[v] then
+          if v:FindFirstChild("ItemRoot") and not seen[v] and not itemHeld(v) then
             seen[v] = true
             local pos = nil
             pcall(function()
@@ -381,6 +406,25 @@ return function(api)
               if p then pos = p.Position end
             end)
             if pos then items[#items + 1] = { m = v, pos = pos, name = v.Name } end
+          end
+        end
+      end
+    end
+    -- builderman buildings (sentries/tripmines/dispensers)
+    do
+      local ig = mp and mp.Parent or nil
+      if ig then
+        for _, v in ipairs(ig:GetChildren()) do
+          if (v.Name == "BuildermanSentry" or v.Name == "SubspaceTripmine" or v.Name == "BuildermanDispenser")
+            and not seen[v] then
+            seen[v] = true
+            local pos = nil
+            pcall(function()
+              local p = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart", true)
+              if p then pos = p.Position end
+              if not pos then pos = v:GetBoundingBox().Position end
+            end)
+            if pos then items[#items + 1] = { m = v, pos = pos, name = v.Name, build = true } end
           end
         end
       end
@@ -446,6 +490,121 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
+  -- FlowGame minigame auto-solve (hooks the game's own solver table in
+  -- memory; restored on unload. Solves the generator flow puzzle for you.)
+  -- --------------------------------------------------------------------------
+  local flowOrigNew, flowFG = nil, nil
+  local function flowKey(n) return n.row .. "-" .. n.col end
+  local function flowNeighbour(r1, c1, r2, c2)
+    if r2 == r1 - 1 and c2 == c1 then return true end
+    if r2 == r1 + 1 and c2 == c1 then return true end
+    if r2 == r1 and c2 == c1 - 1 then return true end
+    if r2 == r1 and c2 == c1 + 1 then return true end
+    return false
+  end
+  local function flowSolve(puzzle)
+    if not puzzle or not puzzle.Solution then return end
+    for _, ci in ipairs((function()
+      local idx = {}
+      for i = 1, #puzzle.Solution do idx[i] = i end
+      return idx
+    end)()) do
+      if moduleDead or not F.flow_on then return end
+      local solution = puzzle.Solution[ci]
+      if solution then
+        -- order path from an endpoint inward
+        local lookup = {}
+        for _, n in ipairs(solution) do lookup[flowKey(n)] = n end
+        local start = solution[1]
+        for _, n in ipairs(solution) do
+          local nb = 0
+          for _, d in ipairs({ { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } }) do
+            if lookup[(n.row + d[1]) .. "-" .. (n.col + d[2])] then nb = nb + 1 end
+          end
+          if nb == 1 then start = n break end
+        end
+        local pool, ordered = {}, {}
+        for _, n in ipairs(solution) do pool[flowKey(n)] = { row = n.row, col = n.col } end
+        local cur = { row = start.row, col = start.col }
+        table.insert(ordered, cur)
+        pool[flowKey(cur)] = nil
+        while next(pool) do
+          local moved = false
+          for k, node in pairs(pool) do
+            if flowNeighbour(cur.row, cur.col, node.row, node.col) then
+              table.insert(ordered, { row = node.row, col = node.col })
+              pool[k] = nil; cur = node; moved = true; break
+            end
+          end
+          if not moved then break end
+        end
+        puzzle.paths[ci] = {}
+        for _, node in ipairs(ordered) do
+          if moduleDead or not F.flow_on then return end
+          table.insert(puzzle.paths[ci], { row = node.row, col = node.col })
+          pcall(function() puzzle:updateGui() end)
+          task.wait(0.05)
+        end
+        task.wait(0.5)
+        pcall(function() puzzle:checkForWin() end)
+      end
+    end
+  end
+  local function flowHook()
+    local ok, FG = pcall(function()
+      local mods = game:GetService("ReplicatedStorage"):FindFirstChild("Modules")
+      local mini = mods and mods:FindFirstChild("Minigames")
+      local fg = mini and mini:FindFirstChild("FlowGameManager")
+      local mod = fg and fg:FindFirstChild("FlowGame")
+      return mod and require(mod) or nil
+    end)
+    if ok and FG and FG.new and not flowOrigNew then
+      flowOrigNew, flowFG = FG.new, FG
+      FG.new = function(...)
+        local p = flowOrigNew(...)
+        if F.flow_on then
+          task.spawn(function()
+            task.wait(0.3)
+            if F.flow_on and not moduleDead then flowSolve(p) end
+          end)
+        end
+        return p
+      end
+    end
+    return ok and FG ~= nil
+  end
+
+  -- --------------------------------------------------------------------------
+  -- Infinite stamina (game's own sprint table, refreshed, restored on unload)
+  -- --------------------------------------------------------------------------
+  local stamMod = nil
+  local stamOrig = nil
+  local function stamApply()
+    if not F.stam_on then return end
+    if not stamMod then
+      pcall(function()
+        stamMod = require(game:GetService("ReplicatedStorage").Systems.Character.Game.Sprinting)
+      end)
+      if not stamMod then return end
+    end
+    pcall(function()
+      if stamOrig == nil then
+        stamOrig = { loss = stamMod.StaminaLoss, dis = stamMod.StaminaLossDisabled }
+      end
+      stamMod.StaminaLoss = 0
+      stamMod.StaminaLossDisabled = true
+    end)
+  end
+  local function stamRestore()
+    if stamMod and stamOrig then
+      pcall(function()
+        stamMod.StaminaLoss = stamOrig.loss
+        stamMod.StaminaLossDisabled = stamOrig.dis
+      end)
+    end
+    stamMod, stamOrig = nil, nil
+  end
+  -- --------------------------------------------------------------------------
   -- Fix (the game's own repair remote, same as the prompt key)
   -- --------------------------------------------------------------------------
   local fixBusy = false
@@ -484,7 +643,7 @@ return function(api)
   -- Status
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
-  local statTick, scanTick, labelTick, auraTick, nP, nK = 0, 0, 0, 0, 0, 0
+  local statTick, scanTick, labelTick, auraTick, stamTick, nP, nK = 0, 0, 0, 0, 0, 0, 0
   local killerNear, killerDist = false, math.huge
 
   -- --------------------------------------------------------------------------
@@ -526,7 +685,7 @@ return function(api)
               local d = (meHRP.Position - hrp.Position).Magnitude
               if d ~= d or d > F.esp_range then hideRig(e) return end
               nP = nP + 1
-              local killer = hum.MaxHealth > 250
+              local killer = isKiller(pl)
               if killer then
                 nK = nK + 1
                 if d < killerDist then killerDist = d end
@@ -617,8 +776,17 @@ return function(api)
                 if d == d and d <= range then
                   local sp, heard = wts(e.pos)
                   if L and heard and names and onScreenPt(sp, vs) then
-                    L.Text = e.name .. "  " .. math.floor(d + 0.5) .. "m"
-                    L.Color = col
+                    local tag = e.name
+                    if e.prog and e.prog.Parent then
+                      local okP, pv = pcall(function() return e.prog.Value end)
+                      if okP and type(pv) == "number" then
+                        tag = ("Generator %d%%"):format(clamp(math.floor(pv + 0.5), 0, 100))
+                      end
+                    elseif e.build then
+                      tag = e.name
+                    end
+                    L.Text = tag .. "  " .. math.floor(d + 0.5) .. "m"
+                    L.Color = e.build and F.build_col or col
                     L.Position = V2(sp.X, sp.Y)
                     L.Visible = true
                   end
@@ -677,6 +845,12 @@ return function(api)
           if g then fixGenerator(g) end
         end)
       end
+      if F.stam_on and now - stamTick > 0.5 then
+        stamTick = now
+        guarded("stam", stamApply)
+      elseif not F.stam_on and stamMod then
+        guarded("stam", stamRestore)
+      end
 
       gcGlow(seenGlow)
 
@@ -718,6 +892,11 @@ return function(api)
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     for _, page in pairs(pages) do page:Destroy() end
     freeTransient()
+    pcall(stamRestore)
+    if flowFG and flowOrigNew then
+      pcall(function() flowFG.new = flowOrigNew end)
+      flowFG, flowOrigNew = nil, nil
+    end
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for k in pairs(glowSeenT) do glowSeenT[k] = nil end
@@ -824,6 +1003,17 @@ return function(api)
   flagToggle(auraSec, "Auto-fix aura", "aura_on")
   flagSlider(auraSec, "Radius", "aura_range", 10, 400, { suf = "m" })
   flagSlider(auraSec, "Every", "aura_rate", 1, 15, { dec = 1, suf = "s" })
+  local flowSec = pages.Fix:Section({ Name = "Minigame solver" })
+  flowSec:Paragraph("Auto-solves the generator flow puzzle when it pops up. Hooks the game's solver table (restored on unload).")
+  flowSec:Toggle({ Name = "Auto-solve flow puzzle", Default = F.flow_on == true, Flag = "fs_flow_on",
+    Tooltip = "Arms the solver hook on enable",
+    Callback = function(v)
+      F.flow_on = v == true
+      if v then task.spawn(function() guarded("flowhook", flowHook) end) end
+    end })
+  local stamSec = pages.Fix:Section({ Name = "Stamina" })
+  stamSec:Paragraph("Zeroes stamina drain via the game's sprint table. Restored on off/unload.")
+  flagToggle(stamSec, "Infinite stamina", "stam_on")
 
   local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("FORSAKEN - hub module v" .. MODULE_VERSION)
