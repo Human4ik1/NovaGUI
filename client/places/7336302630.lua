@@ -856,17 +856,18 @@ return function(api)
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
-        -- exit point: 1.5m past the middle along the walk line. You press
-        -- H standing right against the door, so no need to march on.
-        local exitPt = Vector3.new(dp.X + dir0.X * 1.5, root.Position.Y, dp.Z + dir0.Z * 1.5)
-        local t0, lastFire = os.clock(), 0
+        -- exit point: 2m past the middle along the walk line. Measured
+        -- from the LIVE position every frame, so a server yank-back just
+        -- means more walking instead of an early stop mid-slab.
+        local exitPt = Vector3.new(dp.X + dir0.X * 2, root.Position.Y, dp.Z + dir0.Z * 2)
+        local t0, lastFire, prevDot = os.clock(), 0, nil
         while os.clock() - t0 < 4 do
           if not root.Parent then break end
           local rp = root.Position
           local toExit = Vector3.new(exitPt.X - rp.X, 0, exitPt.Z - rp.Z)
           if toExit.Magnitude < 0.7 then break end
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
-          local step = 6 / 60
+          local step = 10 / 60
           root.CFrame = CFrame.new(
             Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
           pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
@@ -880,13 +881,26 @@ return function(api)
             end
           end)
           local now = os.clock()
-          -- auto-knock can be switched off (World → Door interaction) so you
-          -- can mash the real F yourself mid-walk and prove the mechanic
-          -- before trusting the automation.
-          if F.door_knock ~= false and now - lastFire >= 0.06 then
-            lastFire = now
-            local p = root.Position
-            pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+          -- spam concentrates INSIDE, not outside: packets fired from the
+          -- street are auto-rejected by the server, so outside we walk
+          -- quietly and open fire only once past the slab (~33/s). The
+          -- exact crossing frame gets a bonus double-knock.
+          if F.door_knock ~= false then
+            local rel = Vector3.new(rp.X - dp.X, 0, rp.Z - dp.Z)
+            local dot = rel.X * dir0.X + rel.Z * dir0.Z
+            if prevDot ~= nil and prevDot <= 0 and dot > 0 then
+              for _ = 1, 2 do
+                local p = root.Position
+                pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+              end
+              lastFire = now
+            end
+            prevDot = dot
+            if dot > -0.5 and now - lastFire >= 0.03 then
+              lastFire = now
+              local p = root.Position
+              pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+            end
           end
           task.wait()
         end
@@ -1699,7 +1713,7 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you just past it and — if Auto knock is on — spams the same open packet as F the whole way. Turn Auto knock OFF to walk through and mash the real F yourself first.")
+  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you through at 10 m/s and — if Auto knock is on — fires the open packet only once past the slab (~33/s, double-knock on the crossing frame). Outside packets are pointless: the server rejects them.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
   flagToggle(doorActionSec, "Auto knock", "door_knock",
     "Fire the open packet while walking — turn OFF to mash the real F yourself and verify the trick works")
