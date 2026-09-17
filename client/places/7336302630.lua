@@ -879,6 +879,14 @@ return function(api)
     if not rem then Notify("Doors", "Door remote not found", "warn"); return end
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
+      -- the server expects the door MODEL (captured format): entry.m can be
+      -- a bare part when the scan matched one — climb to its model, or the
+      -- packet addresses the wrong object and dies silently.
+      local doorObj = door.m
+      if doorObj and doorObj:IsA("BasePart") then
+        doorObj = doorObj:FindFirstAncestorOfClass("Model") or doorObj
+      end
+      if not doorObj then doorObj = door.m end
       local ok, err = pcall(function()
         -- aim at the DOOR'S MIDDLE, not entry.root: the scan keeps the
         -- first BasePart it finds, which is often the Hinge at the side
@@ -901,8 +909,9 @@ return function(api)
           end
         end
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        local autoWas = (hum and hum.AutoRotate) ~= false
-        if hum then pcall(function() hum.AutoRotate = false end) end
+        -- NOTE: AutoRotate stays untouched — Humanoid:Move faces the walk
+        -- direction by itself, and the rotation pin below preserves
+        -- position (no teleports involved anywhere in this walk).
         -- HEAD LEAN: the server judges inside/outside by your replicated
         -- HEAD, not the root — a head parked 1m past the slab reads as
         -- "inside" while the body stays put (this exact stretched pose
@@ -928,26 +937,24 @@ return function(api)
           if F.door_knock ~= false and prevDot ~= nil and prevDot <= 0 and dot > 0 then
             for _ = 1, 2 do
               local p = root.Position
-              pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+              pcall(function() rem:FireServer(doorObj, 0, p.X, p.Y, p.Z) end)
             end
           end
           prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
           if dot < -0.2 then
-            -- crouch-pace to the slab MIDDLE and stop there: the body parks
-            -- inside the doorway (noclip holds it safe), the leaned head is
-            -- already a meter past into the room. No marching past the door.
-            local step = 5 / 60
-            root.CFrame = CFrame.new(
-              Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
+            -- NATIVE walk, not CFrame driving: the humanoid itself steps
+            -- through (noclip holds collisions off), exactly like the
+            -- Universal noclip you walk with by hand. CFrame-driving fought
+            -- physics + server every frame and read as teleporting.
+            if hum and hum.Parent then pcall(function() hum:Move(dir0, false) end) end
+            root.CFrame = CFrame.new(rp, look) -- rotation only, pos kept
           else
             if not insideT then insideT = os.clock() end
             if os.clock() - insideT > 1.5 then finished = true end
+            if hum and hum.Parent then pcall(function() hum:Move(Vector3.new(0, 0, 0), false) end) end
             root.CFrame = CFrame.new(rp, look) -- hold the middle, keep facing
           end
-          pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
-          -- hold the lean: head parked past the slab, velocity killed so the
-          -- neck can't yank it home mid-burst
           if head and head.Parent and headTarget then
             pcall(function()
               head.CFrame = CFrame.new(headTarget, Vector3.new(headTarget.X + dir0.X, headTarget.Y, headTarget.Z + dir0.Z))
@@ -972,14 +979,14 @@ return function(api)
             knockAlt = (knockAlt == 0) and 1 or 0
             local p = root.Position
             local act = knockAlt
-            pcall(function() rem:FireServer(nearest.m, act, p.X, p.Y, p.Z) end)
+            pcall(function() rem:FireServer(doorObj, act, p.X, p.Y, p.Z) end)
           end
           task.wait()
         end
         for p, v in pairs(parts) do
           pcall(function() if p.Parent then p.CanCollide = v end end)
         end
-        if hum then pcall(function() hum.AutoRotate = autoWas end) end
+        if hum and hum.Parent then pcall(function() hum:Move(Vector3.new(0, 0, 0), false) end) end
       end)
       if ok then Notify("Doors", "Phase walk → " .. tostring(nearest.name), "ok")
       else Notify("Doors", tostring(err), "warn") end
