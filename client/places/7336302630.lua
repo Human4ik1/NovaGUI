@@ -830,30 +830,35 @@ return function(api)
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
       local ok, err = pcall(function()
-        -- through-direction = YOUR approach line, not the part's LookVector
-        -- (door parts are often rotated along the wall, which used to drop
-        -- you beside the door instead of behind it). You walk at the door
-        -- facing it, so continuing that line lands you right behind it.
+        -- through-direction = the door slab's own NORMAL (thin axis), not
+        -- your approach line and not the part's LookVector: the approach
+        -- line lands you sideways when you come at an angle, and part
+        -- axes are often rotated along the wall. Thin axis of a door box
+        -- is always the way through it.
         local dp = door.root.Position
-        local toDoor = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
-        local dir
-        if toDoor.Magnitude > 0.05 then
-          dir = toDoor.Unit
+        local dc = door.root.CFrame
+        local sz = door.root.Size
+        local nrm
+        if sz.X <= sz.Z then
+          nrm = Vector3.new(dc.RightVector.X, 0, dc.RightVector.Z)
         else
-          local dc = door.root.CFrame
-          dir = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
-          if dir.Magnitude < 0.05 then dir = Vector3.new(0, 0, 1) end
-          dir = dir.Unit
+          nrm = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
         end
-        -- right up against the far face: half the door thickness + body
-        -- margin. Close enough to touch, far enough not to clip inside it.
-        local depth = 2
-        pcall(function()
-          local sz = door.root.Size
-          depth = math.max(sz.X, sz.Z) / 2 + 1.5
-          if depth < 1.8 then depth = 1.8 end
-        end)
-        local target = Vector3.new(dp.X + dir.X * depth, root.Position.Y, dp.Z + dir.Z * depth)
+        if nrm.Magnitude < 0.05 then
+          local toDoor = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
+          nrm = (toDoor.Magnitude > 0.05) and toDoor.Unit or Vector3.new(0, 0, 1)
+        else
+          nrm = nrm.Unit
+        end
+        local toPl = root.Position - dp
+        local side = ((toPl.X * nrm.X + toPl.Z * nrm.Z) > 0) and -1 or 1
+        -- right up against the far face: HALF THE THIN side + body margin.
+        -- (max() here used to measure the door's WIDTH and dropped you
+        -- meters past it.)
+        local thin = math.min(sz.X, sz.Z)
+        local depth = thin / 2 + 1.5
+        if depth < 1.8 then depth = 1.8 end
+        local target = Vector3.new(dp.X + nrm.X * side * depth, root.Position.Y, dp.Z + nrm.Z * side * depth)
         -- pin the turn: while movement keys are held the Humanoid re-faces
         -- the walk direction every frame and would instantly undo our CFrame,
         -- so AutoRotate goes off for the burst (restored right after).
@@ -865,7 +870,10 @@ return function(api)
           root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
           root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         end)
-        -- step through, face the door, swing the camera onto it as well
+        -- step through, then RE-PIN the 180 every packet: the game
+        -- re-asserts facing within frames (walk direction, camera state),
+        -- so one CFrame set decays to a ~30-degree shrug. Four pins over
+        -- ~0.15s hold the turn until the knocks are out.
         root.CFrame = CFrame.new(target, Vector3.new(dp.X, target.Y, dp.Z))
         pcall(function()
           local cam = workspace.CurrentCamera
@@ -877,6 +885,13 @@ return function(api)
         -- as the step (before the server can pull you back), three more
         -- follow in case the yank is instant.
         for _ = 1, 4 do
+          pcall(function()
+            root.CFrame = CFrame.new(root.Position, Vector3.new(dp.X, root.Position.Y, dp.Z))
+            local cam = workspace.CurrentCamera
+            if cam then
+              cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
+            end
+          end)
           local p = root.Position
           pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
           task.wait(0.04)
