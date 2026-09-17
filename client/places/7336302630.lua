@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.10-mines"
+  local MODULE_VERSION = "2.11-headlean"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -903,6 +903,18 @@ return function(api)
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
+        -- HEAD LEAN: the server judges inside/outside by your replicated
+        -- HEAD, not the root — a head parked 1m past the slab reads as
+        -- "inside" while the body stays put (this exact stretched pose
+        -- happened by accident and opened doors with plain F). So: pin the
+        -- head through the door every frame, spam packets addressed from
+        -- the root as usual. No joint is broken — pinning stops at the end
+        -- and the neck re-seats itself.
+        local head = ch and ch:FindFirstChild("Head")
+        local headTarget = nil
+        if head and head:IsA("BasePart") then
+          headTarget = Vector3.new(dp.X + dir0.X * 1.0, head.Position.Y, dp.Z + dir0.Z * 1.0)
+        end
         -- exit point is only used to aim the walk; the walk ENDS by lingering
         -- 1m past the middle, not by marching on: village rooms are tiny and
         -- 2m past the slab is often already behind the BACK wall (outside
@@ -936,6 +948,15 @@ return function(api)
             root.CFrame = CFrame.new(rp, look) -- hold the spot, keep facing
           end
           pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
+          -- hold the lean: head parked past the slab, velocity killed so the
+          -- neck can't yank it home mid-burst
+          if head and head.Parent and headTarget then
+            pcall(function()
+              head.CFrame = CFrame.new(headTarget, Vector3.new(headTarget.X + dir0.X, headTarget.Y, headTarget.Z + dir0.Z))
+              head.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+              head.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+          end
           if ch and ch.Parent then
             for p in pairs(parts) do if p.Parent then p.CanCollide = false end end
           end
