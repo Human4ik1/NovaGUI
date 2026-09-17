@@ -17,7 +17,8 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.17-loottab"
+  local NovaUI = api.Nova
+  local MODULE_VERSION = "2.18-dedupe"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -72,10 +73,13 @@ return function(api)
     esp_name = false, esp_dist = false, esp_weapon = false,
     esp_thick = 2, esp_range = 4000,
     esp_enemy = Color3.fromRGB(255, 90, 90),
+    look_on = false, look_range = 300, look_col = Color3.fromRGB(255, 200, 80),
+    aimed_on = false, aimed_range = 500,
     aim_on = false, aim_part = "Head", aim_fov = 15, aim_smooth = 65,
     aim_range = 1200,
     aim_hold = "right", aim_prio = "closest", aim_vis = true,
     aim_circle = false, aim_pause = true, aim_delay = 0.1,
+    skip_friends = true, skip_wl = true, bl_only = false,
     glow_on = false, glow_npc = false, glow_corpse = false, glow_top = true,
     glow_vis = false, glow_viscol = Color3.fromRGB(255, 255, 255), glow_visthick = 3,
     glow_enemy = Color3.fromRGB(255, 90, 90),
@@ -611,6 +615,35 @@ return function(api)
         end
       end
     end
+    -- dedupe: same instance twice, same-name neighbours, or a drop
+    -- sitting on a crate spot draw TWO visuals (box + glow) on one
+    -- perceived item. Positions are scan-fresh here, so filter centrally:
+    -- keep the first, silence the rest. (Same-name stacks closer than 1.5m
+    -- merge into one marker — clarity over counting bullets.)
+    do
+      local clean, n = {}, 0
+      for i, e in ipairs(loot) do
+        if i % 300 == 0 then task.wait() end
+        local bad = false
+        if e.m and e.pos then
+          local ekind = (e.kind == "drop" or e.kind == "quest") and "loose" or "box"
+          local ename = e.name:lower()
+          for j = 1, n do
+            local o = clean[j]
+            if o.m == e.m then bad = true break end
+            if o.pos then
+              local dd = (e.pos - o.pos).Magnitude
+              if dd == dd and dd < 1.5 then
+                local okind = (o.kind == "drop" or o.kind == "quest") and "loose" or "box"
+                if ename == o.name:lower() or ekind ~= okind then bad = true break end
+              end
+            end
+          end
+        end
+        if not bad then n = n + 1; clean[n] = e end
+      end
+      loot = clean
+    end
     -- nearest-first: the loot glow budget goes to the closest crates
     if myPos then
       table.sort(loot, function(a, b)
@@ -696,6 +729,7 @@ return function(api)
   -- Glow
   -- --------------------------------------------------------------------------
   local glowMap = {}
+  local glowSeenT = {} -- key -> last frame it was wanted (flicker grace)
   local objectIds, nextObjectId = setmetatable({}, { __mode = "k" }), 0
   local function glowKey(object, tag)
     if not objectIds[object] then nextObjectId = nextObjectId + 1; objectIds[object] = nextObjectId end
@@ -718,10 +752,12 @@ return function(api)
     if not on then
       if prev then pcall(function() prev:Destroy() end) end
       glowMap[key] = nil
+      glowSeenT[key] = nil
       return
     end
     local isLoot = pool == "loot"
     if prev and prev.Parent then
+      glowSeenT[key] = os.clock()
       -- refresh live props so the Through-walls / colour toggles apply to
       -- highlights that already exist (they used to be frozen at creation)
       if isLoot then glowUsedLoot = glowUsedLoot + 1
@@ -754,12 +790,25 @@ return function(api)
       return h
     end)
     glowMap[key] = (ok and hl) or nil
+    if glowMap[key] then glowSeenT[key] = os.clock() end
   end
-  local function gcGlow(seen)
+  local function gcGlow(seen, stamp)
+    -- 2s grace: single-frame drops (cache swap, stream hiccup, range edge)
+    -- must not blink the highlight — destroy only after 2s unseen.
+    -- BUT grace is suspended under pressure: past ~31 live Highlights the
+    -- engine itself starts dropping renders at random (the flicker), so
+    -- when the map is full we free unseen slots immediately instead.
+    local now = stamp or os.clock()
+    local live = 0
+    for _ in pairs(glowMap) do live = live + 1 end
+    local grace = (live < 30) and 2 or 0
     for k, h in pairs(glowMap) do
       if not seen[k] then
-        pcall(function() h:Destroy() end)
-        glowMap[k] = nil
+        if now - (glowSeenT[k] or 0) > grace then
+          pcall(function() h:Destroy() end)
+          glowMap[k] = nil
+          glowSeenT[k] = nil
+        end
       end
     end
   end
@@ -861,6 +910,7 @@ return function(api)
     e.dist = mkTx(12)
     e.weapon = mkTx(12)
     e.trace = mkLn()
+    e.sight = mkLn()
     for i = 1, 8 do e.corners[i] = mkLn() end
     end)
     allocating = nil
@@ -873,9 +923,10 @@ return function(api)
     pesc[plr] = e
     return e
   end
+  local RIG_KEYS = { "outline", "box", "hback", "hfill", "name", "dist", "weapon", "trace", "sight" }
   local function hideRig(e)
     if not e then return end
-    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "dist", "weapon", "trace" }) do
+    for _, k in ipairs(RIG_KEYS) do
       local o = e[k]
       if o then pcall(function() o.Visible = false end) end
     end
@@ -886,7 +937,7 @@ return function(api)
   local function freeRig(plr)
     local e = pesc[plr]
     if not e then return end
-    for _, k in ipairs({ "outline", "box", "hback", "hfill", "name", "dist", "weapon", "trace" }) do
+    for _, k in ipairs(RIG_KEYS) do
       local o = e[k]
       if o then pcall(function() o:Remove() end) end
     end
@@ -901,6 +952,19 @@ return function(api)
   -- Aim state
   -- --------------------------------------------------------------------------
   local aimOn, aimSince, aimTarget = false, 0, nil
+  -- test-slice note: the ui_config test executes ONLY the flagToggle→boot
+  -- chunk, so everything here must be definition-only (never executed at
+  -- require time). List persistence (loadSets/saveSets) + row wiring live
+  -- inside the UI chunk below and write into these shared tables.
+  local wlSet, blSet, friendSet = {}, {}, {}
+  local function aimAllowed(pl)
+    local id = tostring(pl.UserId)
+    if blSet[id] then return true end
+    if F.bl_only then return false end
+    if F.skip_friends ~= false and friendSet[id] then return false end
+    if F.skip_wl ~= false and wlSet[id] then return false end
+    return true
+  end
   local function aimPoint(model, part)
     local inst = (part == "Head" and model:FindFirstChild("Head"))
       or (part == "UpperTorso" and model:FindFirstChild("UpperTorso"))
@@ -1058,6 +1122,8 @@ return function(api)
       local seenGlow, seenAdorn = {}, {}
       glowUsedEntity, glowUsedLoot = 0, 0 -- per-frame budget reset, both pools
       nP, nC, nL, nB = 0, 0, 0, 0
+      local aimerCount, aimerNear = 0, math.huge
+      local myHead = me and me:FindFirstChild("Head")
 
       -- mines FIRST in the entity pool (before players/bots/corpses):
       -- step-on-it hazards beat decoration. Nearest-first capped, so the
@@ -1234,6 +1300,51 @@ return function(api)
                 e.weapon.Text = g
                 e.weapon.Color = Color3.fromRGB(235, 235, 245)
                 e.weapon.Position = V2(cx, wy)
+              end
+              -- look ray: from their eyes along their facing, clipped by the
+              -- first wall (same wall anyone standing there would see). Plus
+              -- the reverse check — are THEY looking at ME?
+              e.sight.Visible = false
+              local hd = ch:FindFirstChild("Head")
+              if hd and hd:IsA("BasePart") and (F.look_on or F.aimed_on) then
+                local o = hd.Position
+                local lv = hd.CFrame.LookVector
+                if lv.Magnitude > 0.01 then
+                  lv = lv.Unit
+                  local maxL = math.max(F.look_range or 300, F.aimed_range or 0)
+                  local okH, hit = pcall(function()
+                    rayParams.FilterDescendantsInstances = { frameMe or me, ch }
+                    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                    rayParams.IgnoreWater = true
+                    return workspace:Raycast(o, lv * maxL, rayParams)
+                  end)
+                  local wall = (okH and hit) and (hit.Position - o).Magnitude or maxL
+                  if F.look_on and wall > 1 then
+                    local drawL = math.min(wall, F.look_range or 300)
+                    local h2, hOn = wts(o)
+                    local e2, eOn = wts(o + lv * drawL)
+                    if hOn and eOn and onScreenPt(h2, vs, 160) and onScreenPt(e2, vs, 160) then
+                      e.sight.Color = F.look_col
+                      e.sight.Thickness = 1
+                      e.sight.From = h2
+                      e.sight.To = e2
+                      e.sight.Visible = true
+                    end
+                  end
+                  if F.aimed_on and myHead and myHead.Parent then
+                    local mp = myHead.Position
+                    local toMe = mp - o
+                    local md = toMe.Magnitude
+                    if md > 1 and md <= (F.aimed_range or 500) then
+                      -- ~4 degrees cone + wall must be BEHIND me (their ray
+                      -- reaches me before anything solid)
+                      if lv:Dot(toMe / md) > 0.997 and wall + 1 >= md then
+                        aimerCount = aimerCount + 1
+                        if md < aimerNear then aimerNear = md end
+                      end
+                    end
+                  end
+                end
               end
             end)
             if not playerOk then freeRig(pl); rigRetry[pl] = os.clock() + 2 end
@@ -1560,7 +1671,7 @@ return function(api)
           local origin = camera.CFrame.Position
           local look = camera.CFrame.LookVector
           for _, pl in ipairs(players:GetPlayers()) do
-            if pl ~= LP then
+            if pl ~= LP and aimAllowed(pl) then
               local ch = pl.Character
               if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
               local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -1670,6 +1781,19 @@ return function(api)
           dotm.Size = V2(7, 7)
           dotm.Position = V2(vs.X / 2 - 3.5, vs.Y / 2 - 3.5)
         end
+        -- aimed-at alert: one quiet hollow dot under the crosshair when at
+        -- least one player is looking at you (cone-checked + wall-checked).
+        -- No text, no flash — size grows slightly with the crowd.
+        if F.aimed_on and aimerCount > 0 then
+          local warn = tshape("Circle")
+          warn.Color = Color3.fromRGB(255, 150, 60)
+          warn.Transparency = 1
+          warn.Filled = false
+          warn.Thickness = 2
+          warn.NumSides = 24
+          warn.Radius = 7 + math.min(aimerCount, 5) * 2
+          warn.Position = V2(vs.X / 2, vs.Y / 2 + 30)
+        end
       end)
 
       gcGlow(seenGlow)
@@ -1711,6 +1835,7 @@ return function(api)
     freeTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
+    for k in pairs(glowSeenT) do glowSeenT[k] = nil end
     for _, a in pairs(adornMap) do pcall(function() a:Destroy() end) end
     for k in pairs(adornMap) do adornMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
@@ -1795,6 +1920,160 @@ return function(api)
   flagSlider(pSec, "Thickness", "esp_thick", 1, 5)
   flagSlider(pSec, "Range", "esp_range", 200, 6000, { suf = "m" })
   flagColor(pSec, "Enemy color", "esp_enemy")
+  local lookSec = espTabs.Players:Section({ Name = "Look rays" })
+  lookSec:Paragraph("A ray from every player's eyes, clipped by the first wall — see what they're looking at. Runs inside the player pass (needs ESP enabled).")
+  flagToggle(lookSec, "Look rays", "look_on")
+  flagSlider(lookSec, "Max length", "look_range", 50, 1500, { suf = "m" })
+  flagColor(lookSec, "Ray color", "look_col")
+  flagToggle(lookSec, "Aimed-at alert", "aimed_on",
+    "Quiet dot under the crosshair while someone is looking at you (cone + wall checked, no text)")
+  flagSlider(lookSec, "Alert range", "aimed_range", 100, 2000, { suf = "m" })
+  -- Player list: Nova has no columns and no section wipe, so one compact
+  -- column of rows (name + state cycler) with search. Statuses: BL (red,
+  -- aim forced) > WL (blue, aim skipped) > FRIEND (green, aim skipped).
+  -- Sets persist in the profile as pd_wl_list / pd_bl_list.
+  local plistSec = espTabs.Players:Section({ Name = "Player list" })
+  plistSec:Paragraph("Aim filter. Button on each row cycles: — → WL → BL. Friends are detected automatically.")
+  flagToggle(plistSec, "Skip friends", "skip_friends", "Never aim at friends")
+  flagToggle(plistSec, "Skip whitelist", "skip_wl", "Never aim at whitelisted players")
+  flagToggle(plistSec, "Blacklist only", "bl_only", "Aim ONLY at blacklisted players")
+  local LIST_ROWS = 16
+  local listRows, listSearch = {}, ""
+  local COL_BL = Color3.fromRGB(246, 114, 128)
+  local COL_WL = Color3.fromRGB(122, 150, 255)
+  local COL_FR = Color3.fromRGB(96, 214, 150)
+  local function loadSets()
+    wlSet, blSet = {}, {}
+    local function read(name)
+      local N = NovaUI
+      local v = N and N.Flags and N.Flags[name]
+      if type(v) == "table" then return v end
+      local L = N and N._loaded
+      if type(L) == "table" and type(L[name]) == "table" then return L[name] end
+      return {}
+    end
+    for _, id in ipairs(read("pd_wl_list")) do wlSet[tostring(id)] = true end
+    for _, id in ipairs(read("pd_bl_list")) do blSet[tostring(id)] = true end
+  end
+  local function saveSets()
+    local function arr(s)
+      local o = {}
+      for id in pairs(s) do o[#o + 1] = id end
+      table.sort(o)
+      return o
+    end
+    if NovaUI and NovaUI.Flags then
+      NovaUI.Flags["pd_wl_list"] = arr(wlSet)
+      NovaUI.Flags["pd_bl_list"] = arr(blSet)
+    end
+  end
+  local listHead
+  local function paintRow(i)
+    local row = listRows[i]
+    if not row or not row.plr then return end
+    local id = tostring(row.plr.UserId)
+    local tag, col, btn
+    if blSet[id] then tag, col, btn = "BL", COL_BL, "BL"
+    elseif wlSet[id] then tag, col, btn = "WL", COL_WL, "WL"
+    elseif friendSet[id] then tag, col, btn = "FRIEND", COL_FR, "—"
+    else tag, col, btn = "", nil, "—" end
+    local nm = row.plr.DisplayName ~= row.plr.Name
+      and (row.plr.DisplayName .. " (@" .. row.plr.Name .. ")") or row.plr.Name
+    row.lbl.Set(tag ~= "" and (nm .. "  [" .. tag .. "]") or nm)
+    if col then pcall(function() row.lbl.Instance.TextColor3 = col end) end
+    row.btn.SetText(btn)
+    pcall(function() row.lbl.Instance.Visible = true end)
+    pcall(function() row.btn.Instance.Visible = true end)
+  end
+  local function refreshList()
+    if players == nil or LP == nil then return end
+    loadSets()
+    local all = {}
+    for _, pl in ipairs(players:GetPlayers()) do
+      if pl ~= LP then
+        if listSearch == "" or (pl.Name:lower() .. " " .. pl.DisplayName:lower()):find(listSearch, 1, true) then
+          all[#all + 1] = pl
+        end
+      end
+    end
+    table.sort(all, function(a, b) return a.Name:lower() < b.Name:lower() end)
+    local nWL, nBL = 0, 0
+    for _ in pairs(wlSet) do nWL = nWL + 1 end
+    for _ in pairs(blSet) do nBL = nBL + 1 end
+    for i, row in ipairs(listRows) do
+      row.plr = all[i]
+      if row.plr then paintRow(i)
+      else
+        pcall(function() row.lbl.Instance.Visible = false end)
+        pcall(function() row.btn.Instance.Visible = false end)
+      end
+    end
+    local extra = #all - LIST_ROWS
+    if listHead then listHead.Set(("players %d · WL %d · BL %d%s"):format(
+      #all, nWL, nBL, extra > 0 and (" · +" .. extra .. " hidden") or "")) end
+  end
+  local function cycleRow(i)
+    local row = listRows[i]
+    if not row or not row.plr then return end
+    local id = tostring(row.plr.UserId)
+    if not wlSet[id] and not blSet[id] then wlSet[id] = true
+    elseif wlSet[id] then wlSet[id] = nil; blSet[id] = true
+    else blSet[id] = nil end
+    saveSets()
+    refreshList()
+  end
+  local friendBusy = false
+  local function scanFriends()
+    if friendBusy then return end
+    if players == nil or LP == nil then return end
+    friendBusy = true
+    task.spawn(function()
+      local ok, pages = pcall(function() return players:GetFriendsAsync(LP.UserId) end)
+      if ok and pages then
+        local n = 0
+        while true do
+          local okP, items = pcall(function() return pages:GetCurrentPage() end)
+          if not okP or type(items) ~= "table" then break end
+          for _, it in ipairs(items) do
+            local fid = it and (it.Id or it.UserId)
+            if fid then friendSet[tostring(fid)] = true end
+            n = n + 1
+            if n > 1000 then break end
+          end
+          if n > 1000 then break end
+          local okA, fin = pcall(function() return pages.IsFinished end)
+          if not okA or fin then break end
+          local okN = pcall(function() pages:AdvanceToNextPageAsync() end)
+          if not okN then break end
+        end
+      end
+      friendBusy = false
+      pcall(refreshList)
+    end)
+  end
+  plistSec:TextBox({ Name = "Search", Placeholder = "type a name…", Live = true, Flag = "pd_plist_search",
+    Callback = function(v) listSearch = tostring(v or ""):lower(); refreshList() end })
+  listHead = plistSec:Label("…")
+  for i = 1, LIST_ROWS do
+    local lbl = plistSec:Label("")
+    local btn = plistSec:Button({ Name = "—", Callback = function() cycleRow(i) end })
+    listRows[i] = { lbl = lbl, btn = btn, plr = nil }
+    pcall(function() lbl.Instance.Visible = false end)
+    pcall(function() btn.Instance.Visible = false end)
+  end
+  plistSec:Button({ Name = "Refresh list", Variant = "ghost", Callback = function()
+    refreshList(); scanFriends()
+  end })
+  if players ~= nil then
+    reg(players.PlayerAdded:Connect(function() refreshList() end))
+    reg(players.PlayerRemoving:Connect(function() refreshList() end))
+    if task ~= nil then
+      task.defer(function()
+        pcall(refreshList)
+        pcall(scanFriends)
+      end)
+    end
+  end
 
   local aSec = aimTabs["Aim-assist"]:Section({ Name = "Aim-assist" })
   aSec:Paragraph("Assist limits camera correction per second and leaves a dead zone around the crosshair.")
@@ -2011,6 +2290,7 @@ return function(api)
       for _, entry in ipairs(cache) do entry.lbl = nil end
     end
     for key, highlight in pairs(glowMap) do pcall(function() highlight:Destroy() end); glowMap[key] = nil end
+    for key in pairs(glowSeenT) do glowSeenT[key] = nil end
     for key, adorn in pairs(adornMap) do pcall(function() adorn:Destroy() end); adornMap[key] = nil end
     for key, adorn in pairs(adornMap) do pcall(function() adorn:Destroy() end); adornMap[key] = nil end
     HAS_DRAWING = pcall(function() local probe = Drawing.new("Square"); probe:Remove() end)
