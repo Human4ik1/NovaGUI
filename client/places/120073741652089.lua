@@ -39,7 +39,7 @@ return function(api)
     esp_deadcol = Color3.fromRGB(255, 100, 100),
     esp_range = 2500,
     esp_names = true, esp_dist = true,
-    aim_on = false, aim_part = "Body", aim_fov = 12, aim_smooth = 60,
+    aim_on = false, aim_part = "Heart", aim_fov = 12, aim_smooth = 60,
     aim_range = 1500, aim_hold = "always", aim_vis = true, aim_delay = 0.1,
     aim_circle = true, aim_pause = true, aim_predict = true,
     autofire = false,
@@ -257,6 +257,20 @@ return function(api)
   -- --------------------------------------------------------------------------
   local aimOn, aimSince, aimTarget, fireTick = false, 0, nil, 0
   local function aimSpot(m)
+    -- Heart first: an Attachment deep in the spine chain (verified live on
+    -- deer). Falls back to bbox top, then bbox center, then root part.
+    if F.aim_part == "Heart" then
+      local ok, heart = pcall(function()
+        for _, d in ipairs(m:GetDescendants()) do
+          if d:IsA("Attachment") and d.Name:lower() == "heart" then return d end
+        end
+        return nil
+      end)
+      if ok and heart and heart.Parent then
+        local ok2, wp = pcall(function() return heart.WorldPosition end)
+        if ok2 and wp then return wp end
+      end
+    end
     local cf, size = nil, nil
     pcall(function() cf, size = m:GetBoundingBox() end)
     if cf then
@@ -596,25 +610,28 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- UI: ESP / Combat / Teleport / About
   -- --------------------------------------------------------------------------
+  -- separate flag namespace (hu_) on purpose: pd_ is shared with the
+  -- Delta/shooter modules and their saved values (Head part, RMB trigger,
+  -- names off) were leaking into this module and silently breaking it.
   local function flagToggle(sec, name, key, desc, tip)
     return sec:Toggle({ Name = name, Desc = desc, Default = F[key] == true,
-      Flag = "pd_" .. key, Tooltip = tip,
+      Flag = "hu_" .. key, Tooltip = tip,
       Callback = function(v) F[key] = v == true end })
   end
   local function flagSlider(sec, name, key, min, max, extra)
     extra = extra or {}
     return sec:Slider({ Name = name, Min = min, Max = max, Default = F[key],
-      Decimals = extra.dec or 0, Suffix = extra.suf or "", Flag = "pd_" .. key,
+      Decimals = extra.dec or 0, Suffix = extra.suf or "", Flag = "hu_" .. key,
       Tooltip = extra.tip,
       Callback = function(v) F[key] = tonumber(v) or min end })
   end
   local function flagDropdown(sec, name, key, options, tip)
     return sec:Dropdown({ Name = name, Options = options, Default = F[key],
-      Flag = "pd_" .. key, Tooltip = tip,
+      Flag = "hu_" .. key, Tooltip = tip,
       Callback = function(v) F[key] = tostring(v) end })
   end
   local function flagColor(sec, name, key, tip)
-    return sec:Color({ Name = name, Default = F[key], Flag = "pd_" .. key,
+    return sec:Color({ Name = name, Default = F[key], Flag = "hu_" .. key,
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
 
@@ -640,7 +657,7 @@ return function(api)
   flagSlider(liveSec, "Max distance", "esp_range", 200, 6000, { suf = "m" })
   flagColor(liveSec, "Color", "esp_col")
   liveSec:TextBox({ Name = "Filter (comma list)", Placeholder = "Deer,Bear — empty = all",
-    Default = F.esp_filter, Flag = "pd_esp_filter",
+    Default = F.esp_filter, Flag = "hu_esp_filter",
     Callback = function(v) F.esp_filter = tostring(v or "") end })
   local deadSec = espTabs.Dead:Section({ Name = "Dead animals" })
   deadSec:Paragraph("Carcasses ready to harvest.")
@@ -657,7 +674,7 @@ return function(api)
   if not fireClick then
     aimSec:Paragraph("WARNING: this executor exposes no input simulation — autofire cannot work here.")
   end
-  flagDropdown(aimSec, "Aim at", "aim_part", { "Body", "Top" })
+  flagDropdown(aimSec, "Aim at", "aim_part", { "Heart", "Body", "Top" })
   flagSlider(aimSec, "FOV", "aim_fov", 3, 45)
   flagSlider(aimSec, "Max range", "aim_range", 100, 4000, { suf = "m" })
   flagSlider(aimSec, "Smoothness", "aim_smooth", 1, 100, { tip = "Higher = slower, more human" })
@@ -741,7 +758,7 @@ return function(api)
   local moveSec = pages.Teleport:Section({ Name = "Movement" })
   moveSec:Paragraph("Plain WalkSpeed. Resets to 16 on unload.")
   local speedBox = moveSec:Slider({ Name = "Walk speed", Min = 16, Max = 120, Default = F.speed,
-    Flag = "pd_speed",
+    Flag = "hu_speed",
     Callback = function(v) F.speed = tonumber(v) or 16; applySpeed() end })
   if task ~= nil then
     task.defer(function()
