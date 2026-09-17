@@ -2,14 +2,8 @@
   HumaHub place module — Project Delta (PlaceId 7336302630).
   Repo path: client/places/7336302630.lua
 
-  SAFE BY DESIGN (this place bans for behavior):
-    - eyes only: Drawing ESP, Highlight chams, camera aimbot. Nothing here
-      touches movement, humanoid props, remotes, packets, metatables or
-      game scripts/UIs — there is nothing server-side to fingerprint.
-    - NO fly / noclip / teleport / speed / autofire / rage on purpose.
-    - aim defaults are legit-ish (smooth, small FOV, hold-to-aim, visible
-      check, pause while the hub is open). Snapping 180 deg across the map is
-      still YOUR choice — and still detectable. Play sane.
+  Client-side overlays and optional camera assistance.
+  Availability depends on streamed objects and executor APIs.
   Place facts (verified live):
     - no teams (everyone else is hostile), R15, 100hp;
     - characters live as Workspace.<PlayerName> (pl.Character works too);
@@ -23,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.7-navigation"
+  local MODULE_VERSION = "2.8-delta"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -34,38 +28,33 @@ return function(api)
   local LP = players.LocalPlayer
   local rayParams = RaycastParams.new()
 
-  -- fullbright originals (captured on first enable, restored on off/unload)
-  local brightOrig = nil
+  -- Keep illumination steady without repeatedly changing the world's clock.
+  local brightOrig, brightConns, brightWriting = nil, {}, false
+  local brightTargets = { Brightness = 2, FogEnd = 100000, GlobalShadows = false,
+    Ambient = Color3.fromRGB(170, 170, 170), OutdoorAmbient = Color3.fromRGB(170, 170, 170) }
   local function brightApply(on)
     if on then
-      if not brightOrig then
-        brightOrig = {}
-        pcall(function()
-          brightOrig.ClockTime = lighting.ClockTime
-          brightOrig.Brightness = lighting.Brightness
-          brightOrig.FogEnd = lighting.FogEnd
-          brightOrig.GlobalShadows = lighting.GlobalShadows
-          brightOrig.Ambient = lighting.Ambient
-          brightOrig.OutdoorAmbient = lighting.OutdoorAmbient
+      if brightOrig then return end
+      brightOrig = {}
+      for property, target in pairs(brightTargets) do
+        brightOrig[property] = lighting[property]
+        brightConns[#brightConns + 1] = lighting:GetPropertyChangedSignal(property):Connect(function()
+          if brightWriting or not brightOrig then return end
+          if lighting[property] == target then return end -- deferred notification from our own write
+          brightOrig[property] = lighting[property]
+          brightWriting = true
+          pcall(function() lighting[property] = target end)
+          brightWriting = false
         end)
       end
-      pcall(function()
-        lighting.ClockTime = 14
-        lighting.Brightness = 2
-        lighting.FogEnd = 100000
-        lighting.GlobalShadows = false
-        lighting.Ambient = Color3.fromRGB(170, 170, 170)
-        lighting.OutdoorAmbient = Color3.fromRGB(170, 170, 170)
-      end)
+      brightWriting = true
+      for property, target in pairs(brightTargets) do pcall(function() lighting[property] = target end) end
+      brightWriting = false
     elseif brightOrig then
-      pcall(function()
-        if brightOrig.ClockTime ~= nil then lighting.ClockTime = brightOrig.ClockTime end
-        if brightOrig.Brightness ~= nil then lighting.Brightness = brightOrig.Brightness end
-        if brightOrig.FogEnd ~= nil then lighting.FogEnd = brightOrig.FogEnd end
-        if brightOrig.GlobalShadows ~= nil then lighting.GlobalShadows = brightOrig.GlobalShadows end
-        if brightOrig.Ambient ~= nil then lighting.Ambient = brightOrig.Ambient end
-        if brightOrig.OutdoorAmbient ~= nil then lighting.OutdoorAmbient = brightOrig.OutdoorAmbient end
-      end)
+      for _, c in ipairs(brightConns) do c:Disconnect() end
+      brightConns = {}
+      local restore = brightOrig; brightOrig = nil
+      for property, value in pairs(restore) do pcall(function() lighting[property] = value end) end
     end
   end
 
@@ -114,7 +103,12 @@ return function(api)
     corpse_range = 2500,
     npc_on = false, npc_col = Color3.fromRGB(150, 160, 170), npc_range = 2500,
     exit_on = false, exit_col = Color3.fromRGB(110, 230, 130), exit_range = 4000,
-    radar_on = false, radar_range = 800, radar_size = 170,
+    radar_on = false, radar_range = 800, radar_size = 170, radar_corner = "BottomRight",
+    loot_dropname = true, loot_questname = true, loot_contdist = false, loot_dropdist = true, loot_questdist = true,
+    door_glow = false, door_names = true, door_dist = true, door_range = 200,
+    door_color = Color3.fromRGB(255, 195, 70), door_assist = false, door_reach = 8,
+    door_key = Enum.KeyCode.H,
+    aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.UserInputType.MouseButton2,
   }
 
   -- Drawing API presence: without it every shape() call throws inside a
@@ -154,8 +148,10 @@ return function(api)
   -- correctly coloured - and draws nothing at all.
   -- --------------------------------------------------------------------------
   local pools = {}
+  local allocating
   local function shape(typ)
     local s = Drawing.new(typ)
+    if allocating then allocating[#allocating + 1] = s end
     -- Drawing API quirk: Transparency is OPACITY. 1 = solid, 0 = INVISIBLE.
     -- Everything starts solid; nothing in this file may set it to 0.
     pcall(function() s.Transparency = 1 end)
@@ -174,16 +170,18 @@ return function(api)
       s = shape(typ)
       pool.objs[pool.n] = s
     end
-    pcall(function() s.Visible = true end)
+    pcall(function() if not s.Visible then s.Visible = true end end)
     return s
   end
   local function clearTransient()
+    for _, pool in pairs(pools) do pool.n = 0 end
+  end
+  local function finishTransient()
     for _, pool in pairs(pools) do
-      for i = 1, #pool.objs do
+      for i = pool.n + 1, #pool.objs do
         local o = pool.objs[i]
-        pcall(function() o.Visible = false end)
+        pcall(function() if o.Visible then o.Visible = false end end)
       end
-      pool.n = 0
     end
   end
   local function freeTransient()
@@ -227,11 +225,31 @@ return function(api)
       dbg.err[sec] = (dbg.err[sec] or 0) + 1
       dbg.last = sec .. ": " .. tostring(e):sub(1, 90)
     end
+    return ok
   end
   local function boxOf(model)
     local ok, cf, size = pcall(function() return model:GetBoundingBox() end)
+    if model:IsA("BasePart") then return model.CFrame, model.Size end
     if ok and cf and size then return cf, size end
     return nil, nil
+  end
+  local function characterRect(ch, hum, hrp, vs)
+    -- Body anchors exclude weapons, backpacks and detached accessories.
+    local head = ch:FindFirstChild("Head")
+    if head and (head.Position - hrp.Position).Magnitude > 12 then head = nil end
+    local top3 = head and (head.Position + Vector3.new(0, head.Size.Y / 2, 0))
+      or (hrp.Position + Vector3.new(0, 3, 0))
+    local foot = clamp((hum.HipHeight or 2) + hrp.Size.Y / 2, 2.5, 5)
+    local bot3 = hrp.Position - Vector3.new(0, foot, 0)
+    local t2, tOn, tz = wts(top3)
+    local b2, bOn, bz = wts(bot3)
+    if not (tOn and bOn) or tz < 0.25 or bz < 0.25 then return nil end
+    local h = math.max(math.abs(b2.Y - t2.Y), 8)
+    if h ~= h or h > vs.Y * 1.5 then return nil end
+    local w = math.max(h * 0.55, 8)
+    local cx = (t2.X + b2.X) / 2
+    local x0, y0 = cx - w / 2, math.min(t2.Y, b2.Y)
+    return x0, y0, w, h, cx
   end
   -- true when a rect is at least partly on screen (with margin)
   local function onScreen2(x0, y0, w, h, vs, m)
@@ -292,6 +310,7 @@ return function(api)
   -- Cached slow scans (loot / corpses / npc / exits) — 2s timer
   -- --------------------------------------------------------------------------
   local lootCache, corpseCache, npcCache, exitCache, botCache = {}, {}, {}, {}, {}
+  local doorCache, doorTick = {}, -math.huge
   local syncLabelMaps -- fwd: defined below scanWorld, runs on ticks
   local function hlKeys()
     local out = {}
@@ -305,8 +324,72 @@ return function(api)
   -- over Containers can be tens of thousands of nodes and used to hitch the
   -- frame every 2s. It also builds into temp tables and swaps them in at the
   -- end, so a yield mid-scan never leaves the render loop with empty caches.
+  local function doorKeyName(object)
+    -- Project Delta marks keyed doors with a KeyDoor=<KeyName> attribute
+    -- (e.g. CraneKey). Empty/missing = not a keyed door.
+    local ok, value = pcall(function() return object:GetAttribute("KeyDoor") end)
+    if ok and type(value) == "string" and value ~= "" then return value end
+    return nil
+  end
+  local function doorLocked(object)
+    -- Project Delta marks keyed doors with KeyDoor=<KeyName> (self-contained:
+    -- engine tests load this chunk standalone, so no helper calls here).
+    local okK, keyVal = pcall(function() return object:GetAttribute("KeyDoor") end)
+    if okK and type(keyVal) == "string" and keyVal ~= "" then return true end
+    for _, key in ipairs({ "Locked", "IsLocked", "DoorLocked" }) do
+      local value = object:GetAttribute(key)
+      local child = object:FindFirstChild(key)
+      if value == nil and child and child:IsA("BoolValue") then value = child.Value end
+      if type(value) == "boolean" then return value end
+    end
+    for _, key in ipairs({ "RequiredKey", "KeyId", "KeyID", "KeyCard", "RequiresKey" }) do
+      local value = object:GetAttribute(key)
+      local child = object:FindFirstChild(key)
+      if value == nil and child and child:IsA("ValueBase") then value = child.Value end
+      if value ~= nil and value ~= false and tostring(value) ~= "" and tostring(value) ~= "0" then return true end
+    end
+    return false
+  end
+  local function scanDoors()
+    local found, seen = {}, {}
+    for index, object in ipairs(workspace:GetDescendants()) do
+      if moduleDead then return end
+      if index % 1500 == 0 then task.wait() end
+      local interaction = object:IsA("ProximityPrompt") or object:IsA("ClickDetector")
+      if interaction or ((object:IsA("Model") or object:IsA("BasePart")) and object.Name:lower():find("door", 1, true)) then
+        local owner = interaction and object.Parent or object
+        local match, named
+        for _ = 1, 5 do
+          if not owner or owner == workspace then break end
+          if owner:IsA("Model") or owner:IsA("BasePart") then
+            if doorLocked(owner) then match = owner; break end
+            if owner.Name:lower():find("door", 1, true) and (not named or owner:IsA("Model")) then named = owner end
+          end
+          owner = owner.Parent
+        end
+        match = match or named
+        if match then
+          local part = match:IsA("BasePart") and match
+            or match.PrimaryPart or match:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+              local entry = seen[match]
+              if not entry then
+                entry = { m = match, root = part, name = match.Name, pos = part.Position,
+                  actions = {}, key = doorKeyName(match) }
+                seen[match] = entry; found[#found + 1] = entry
+              end
+            if interaction then entry.actions[#entry.actions + 1] = object end
+          end
+        end
+      end
+    end
+    doorCache = found
+  end
   local SCAN_BUDGET = 1500 -- nodes between yields
   local function scanWorld()
+    if (F.door_glow or F.door_assist) and os.clock() - doorTick > 5 then
+      doorTick = os.clock(); scanDoors()
+    end
     local budget = SCAN_BUDGET
     local function step()
       budget = budget - 1
@@ -344,7 +427,7 @@ return function(api)
         local taken = {}
         for _, v in ipairs(desc) do
           step()
-          if v:IsA("Model") then
+          if v:IsA("BasePart") or (v:IsA("Model") and (v.PrimaryPart or v:FindFirstChildOfClass("BasePart"))) then
             local anc, dup = v.Parent, false
             while anc and anc ~= root do
               if taken[anc] then dup = true break end
@@ -417,7 +500,17 @@ return function(api)
       for _, v in ipairs(ok and desc or {}) do
         step()
         if v:IsA("BasePart") then
-          table.insert(exits, { pos = v.Position, name = v.Name, part = v })
+          local owner = v
+          while owner.Parent and owner.Parent ~= ex do owner = owner.Parent end
+          local duplicate = false
+          for _, e in ipairs(exits) do
+            if (owner:IsA("Model") and e.owner == owner) or (e.pos - v.Position).Magnitude < 12 then
+              duplicate = true
+              if v.Name:lower() == "exit" then e.pos, e.part = v.Position, v end
+              break
+            end
+          end
+          if not duplicate then table.insert(exits, { pos = v.Position, name = v.Name, part = v, owner = owner }) end
         end
       end
     end
@@ -468,7 +561,7 @@ return function(api)
 
   -- persistent label objects (zero per-frame allocation): created on
   -- discovery during scans, updated per frame, destroyed when gone
-  local lootMap, corpseMap, npcMap, exitMap, botMap = {}, {}, {}, {}, {}
+  local lootMap, corpseMap, npcMap, exitMap, botMap, doorMap = {}, {}, {}, {}, {}, {}
   local function mkLabel(size)
     local t = shape("Text")
     pcall(function()
@@ -481,68 +574,45 @@ return function(api)
   end
   local function killDraw(o) pcall(function() o:Remove() end) end
   function syncLabelMaps()
-    local seenL, seenC, seenN, seenE, seenB = {}, {}, {}, {}, {}
-    for _, it in ipairs(lootCache) do
-      local m = it.m
-      if m and m.Parent then
-        seenL[m] = true
-        if not lootMap[m] then lootMap[m] = { lbl = mkLabel(12) } end
-        it.lbl = lootMap[m].lbl
-      else
-        it.lbl = nil
+    local root = myHRP()
+    local function sync(cache, map, key, enabled, range, size)
+      local seen = {}
+      for _, entry in ipairs(cache) do
+        local object = entry[key]
+        local active = type(enabled) == "function" and enabled(entry) or enabled == true
+        local position = entry.pos or (entry.hrp and entry.hrp.Position)
+        if HAS_DRAWING and root and active and object and object.Parent and position
+          and (position - root.Position).Magnitude <= range then
+          seen[object] = true
+          if not map[object] then map[object] = { lbl = mkLabel(size) } end
+          entry.lbl = map[object].lbl
+        else entry.lbl = nil end
+      end
+      for object, record in pairs(map) do
+        if not seen[object] then killDraw(record.lbl); map[object] = nil end
       end
     end
-    for _, c in ipairs(corpseCache) do
-      local m = c.m
-      if m and m.Parent then
-        seenC[m] = true
-        if not corpseMap[m] then corpseMap[m] = { lbl = mkLabel(13) } end
-        c.lbl = corpseMap[m].lbl
-      else
-        c.lbl = nil
-      end
-    end
-    for _, npc in ipairs(npcCache) do
-      local m = npc.model
-      if m and m.Parent then
-        seenN[m] = true
-        if not npcMap[m] then npcMap[m] = { lbl = mkLabel(12) } end
-        npc.lbl = npcMap[m].lbl
-      else
-        npc.lbl = nil
-      end
-    end
-    for _, e in ipairs(exitCache) do
-      local p = e.part
-      if p and p.Parent then
-        seenE[p] = true
-        if not exitMap[p] then exitMap[p] = { lbl = mkLabel(14) } end
-        e.lbl = exitMap[p].lbl
-      else
-        e.lbl = nil
-      end
-    end
-    for _, b in ipairs(botCache) do
-      local m = b.model
-      if m and m.Parent then
-        seenB[m] = true
-        if not botMap[m] then botMap[m] = { lbl = mkLabel(13) } end
-        b.lbl = botMap[m].lbl
-      else
-        b.lbl = nil
-      end
-    end
-    for m, o in pairs(lootMap) do if not seenL[m] then killDraw(o.lbl) lootMap[m] = nil end end
-    for m, o in pairs(corpseMap) do if not seenC[m] then killDraw(o.lbl) corpseMap[m] = nil end end
-    for m, o in pairs(npcMap) do if not seenN[m] then killDraw(o.lbl) npcMap[m] = nil end end
-    for p, o in pairs(exitMap) do if not seenE[p] then killDraw(o.lbl) exitMap[p] = nil end end
-    for m, o in pairs(botMap) do if not seenB[m] then killDraw(o.lbl) botMap[m] = nil end end
+    sync(lootCache, lootMap, "m", function(e)
+      if e.kind == "drop" then return F.loot_drop and (F.loot_dropname or F.loot_dropdist) end
+      if e.kind == "quest" then return F.loot_quest and (F.loot_questname or F.loot_questdist) end
+      return F.loot_cont and (F.loot_contname or F.loot_contdist)
+    end, F.loot_range, 12)
+    sync(corpseCache, corpseMap, "m", F.corpse_on or F.corpse_ai, F.corpse_range, 13)
+    sync(npcCache, npcMap, "model", F.npc_on, F.npc_range, 12)
+    sync(exitCache, exitMap, "part", F.exit_on, F.exit_range, 14)
+    sync(botCache, botMap, "model", F.bot_esp, F.bot_range, 13)
+    sync(doorCache, doorMap, "m", F.door_glow and (F.door_names or F.door_dist), F.door_range, 13)
   end
 
   -- --------------------------------------------------------------------------
   -- Glow
   -- --------------------------------------------------------------------------
   local glowMap = {}
+  local objectIds, nextObjectId = setmetatable({}, { __mode = "k" }), 0
+  local function glowKey(object, tag)
+    if not objectIds[object] then nextObjectId = nextObjectId + 1; objectIds[object] = nextObjectId end
+    return tag .. "_" .. objectIds[object]
+  end
   -- Roblox stops rendering Highlights past ~31 live instances: past the cap
   -- new ones silently do nothing, which looks exactly like a broken glow.
   -- TWO independent pools, not one shared counter: players/bots/npc/corpses
@@ -555,7 +625,7 @@ return function(api)
   local glowUsedEntity, glowUsedLoot = 0, 0
   local function setGlow(model, col, on, tag, pool)
     if not model or not model.Parent then return end
-    local key = tostring(tag) .. "_" .. model:GetDebugId()
+    local key = glowKey(model, tostring(tag))
     local prev = glowMap[key]
     if not on then
       if prev then pcall(function() prev:Destroy() end) end
@@ -644,9 +714,13 @@ return function(api)
     end)
     return l
   end
+  local rigRetry = {}
   local function rigOf(plr)
     local e = pesc[plr]
     if e then return e end
+    if (rigRetry[plr] or 0) > os.clock() then return nil end
+    local made = {}; allocating = made
+    local ok = pcall(function()
     e = { corners = {} }
     e.outline = mkSq(false)
     e.box = mkSq(false)
@@ -657,6 +731,14 @@ return function(api)
     e.weapon = mkTx(12)
     e.trace = mkLn()
     for i = 1, 8 do e.corners[i] = mkLn() end
+    end)
+    allocating = nil
+    if not ok then
+      for _, object in ipairs(made) do killDraw(object) end
+      rigRetry[plr] = os.clock() + 2
+      return nil
+    end
+    rigRetry[plr] = nil
     pesc[plr] = e
     return e
   end
@@ -682,7 +764,7 @@ return function(api)
     end
     pesc[plr] = nil
   end
-  reg(players.PlayerRemoving:Connect(function(plr) freeRig(plr) end))
+  reg(players.PlayerRemoving:Connect(function(plr) freeRig(plr); rigRetry[plr] = nil end))
 
   -- --------------------------------------------------------------------------
   -- Aim state
@@ -704,21 +786,67 @@ return function(api)
     return false
   end
 
+  -- Door assist: Delta doors have no prompts — the game itself opens them via
+  --   Remotes.Door:FireServer(doorModel, 0, playerPos.X, playerPos.Y, playerPos.Z)
+  -- (captured live from the F key). Assist sends the exact same packets while
+  -- the key is held, ~8/s, so it is indistinguishable from mashing F — just
+  -- faster and hands-free for the noclip+spam trick. No hooks involved.
+  local doorRem
+  local function getDoorRem()
+    if doorRem and doorRem.Parent then return doorRem end
+    local ok, rem = pcall(function()
+      return game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 3):WaitForChild("Door", 3)
+    end)
+    if ok and rem then doorRem = rem; return rem end
+    return nil
+  end
+  local doorSpamT, doorNoteT = 0, 0
+  local function interactDoor(root)
+    local now = os.clock()
+    local held = F.door_assist and bindingDown(F.door_key) and not userInput:GetFocusedTextBox() and not hubOpen()
+    if not held then return end
+    if now - doorSpamT < 0.12 then return end -- ~8 packets/s
+    doorSpamT = now
+    local nearest, best = nil, tonumber(F.door_reach) or 8
+    for _, entry in ipairs(doorCache) do
+      if entry.m and entry.m.Parent and entry.root and entry.root.Parent then
+        local distance = (root.Position - entry.root.Position).Magnitude
+        if distance <= best then best, nearest = distance, entry end
+      end
+    end
+    if not nearest then
+      if now - doorNoteT > 3 then doorNoteT = now
+        Notify("Doors", "No door within " .. string.format("%.0f", best) .. "m — get closer", "info") end
+      return
+    end
+    local rem = getDoorRem()
+    if not rem then
+      if now - doorNoteT > 3 then doorNoteT = now Notify("Doors", "Door remote not found", "warn") end
+      return
+    end
+    local pos = root.Position
+    local ok, err = pcall(function() rem:FireServer(nearest.m, 0, pos.X, pos.Y, pos.Z) end)
+    if not ok and now - doorNoteT > 3 then doorNoteT = now
+      Notify("Doors", tostring(err), "warn") end
+  end
+
   -- --------------------------------------------------------------------------
   -- Status line
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
   local statTick, nP, nC, nL, nB = 0, 0, 0, 0, 0
+  local labelTick = 0
 
   -- --------------------------------------------------------------------------
   -- Main loop (silent by design: uncaught per-frame errors are observable)
   -- --------------------------------------------------------------------------
   reg(runService.RenderStepped:Connect(function(dt)
-    pcall(function()
+    clearTransient()
+    local renderOk, renderError = pcall(function()
       camera = workspace.CurrentCamera or camera
       if not camera then return end
-      clearTransient()
       local now = os.clock()
+      if now - labelTick > 0.25 then labelTick = now; guarded("labels", syncLabelMaps) end
       dbg.frames = dbg.frames + 1
       if now - dbg.fpsT >= 1 then
         dbg.fps = math.floor(dbg.frames / math.max(now - dbg.fpsT, 0.01) + 0.5)
@@ -736,7 +864,7 @@ return function(api)
       if meHRP then
         for _, pl in ipairs(players:GetPlayers()) do
           if pl ~= LP then
-            guarded("players", function()
+            local playerOk = guarded("players", function()
               -- rigs are 14 Drawing objects each: build one only when the
               -- player actually reaches the drawing stage, not for every
               -- name on the player list
@@ -752,23 +880,15 @@ return function(api)
               -- glow FIRST (presence beats decoration, and it must keep
               -- working even when the drawing side is switched off)
               if F.glow_on then
-                local key = "p_" .. ch:GetDebugId()
+                local key = glowKey(ch, "p")
                 setGlow(ch, F.glow_enemy, true, "p")
                 seenGlow[key] = true
               end
               if not F.esp_on then hideRig(e) return end
               e = rigOf(pl)
-              local cf, size = boxOf(ch)
-              if not (cf and size) then hideRig(e) return end
-              local top3 = cf.Position + Vector3.new(0, size.Y / 2, 0)
-              local bot3 = cf.Position - Vector3.new(0, size.Y / 2, 0)
-              local t2, tOn = wts(top3)
-              local b2, bOn = wts(bot3)
-              if not (tOn or bOn) then hideRig(e) return end
-              local h = math.max(math.abs(b2.Y - t2.Y), 8)
-              local w = math.max(h * 0.55, 8)
-              local cx = (t2.X + b2.X) / 2
-              local x0, y0 = cx - w / 2, math.min(t2.Y, b2.Y)
+              if not e then return end
+              local x0, y0, w, h, cx = characterRect(ch, hum, hrp, vs)
+              if not x0 then hideRig(e) return end
               if not onScreen2(x0, y0, w, h, vs, 120) then hideRig(e) return end
               local col = F.esp_enemy
               local th = F.esp_thick or 2
@@ -861,6 +981,7 @@ return function(api)
                 e.weapon.Position = V2(cx, wy)
               end
             end)
+            if not playerOk then freeRig(pl); rigRetry[pl] = os.clock() + 2 end
           end
         end
       else
@@ -869,20 +990,20 @@ return function(api)
       end
 
       -- bots (hostile AI from AiZones — NOT the same as trader NPCs)
-      if F.bot_esp and meHRP then
+      if (F.bot_esp or F.bot_glow) and meHRP then
         guarded("bots", function()
           for _, b in ipairs(botCache) do
             local m = b.model
             local L = b.lbl
             if L then L.Visible = false end
-            if m and m.Parent and b.hum.Health > 0 and L then
+            if m and m.Parent and b.hum.Health > 0 then
               local d = (meHRP.Position - b.hrp.Position).Magnitude
               if d == d and d <= F.bot_range then
                 nB = nB + 1
                 local cf, size = boxOf(m)
                 if cf and size then
                   local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
-                  if tOn and onScreenPt(t2, vs) then
+                  if F.bot_esp and L and tOn and onScreenPt(t2, vs) then
                     L.Text = b.name .. "  " .. math.floor(d + 0.5) .. "m"
                     L.Color = F.bot_col
                     L.Position = V2(t2.X, t2.Y - 8)
@@ -890,7 +1011,7 @@ return function(api)
                   end
                 end
                 if F.bot_glow then
-                  local key = "b_" .. m:GetDebugId()
+                  local key = glowKey(m, "b")
                   setGlow(m, F.bot_col, true, "b")
                   seenGlow[key] = true
                 end
@@ -905,7 +1026,7 @@ return function(api)
       end
 
       -- npc (traders/bosses)
-      if F.npc_on and meHRP then
+      if (F.npc_on or F.glow_npc) and meHRP then
         guarded("npc", function()
           for _, npc in ipairs(npcCache) do
             local m = npc.model
@@ -923,7 +1044,7 @@ return function(api)
                 local cf, size = boxOf(m)
                 if cf and size then
                   local t2, tOn = wts(cf.Position + Vector3.new(0, size.Y / 2, 0))
-                  if tOn and L and onScreenPt(t2, vs) then
+                  if F.npc_on and tOn and L and onScreenPt(t2, vs) then
                     L.Text = npc.name .. "  " .. math.floor(d + 0.5) .. "m"
                     L.Color = F.npc_col
                     L.Position = V2(t2.X, t2.Y - 8)
@@ -931,7 +1052,7 @@ return function(api)
                   end
                 end
                 if F.glow_npc then
-                  local key = "n_" .. m:GetDebugId()
+                  local key = glowKey(m, "n")
                   setGlow(m, F.npc_col, true, "n")
                   seenGlow[key] = true
                 end
@@ -946,7 +1067,7 @@ return function(api)
       end
 
       -- corpses
-      if F.corpse_on and meHRP then
+      if (F.corpse_on or F.corpse_ai) and meHRP then
         guarded("corpse", function()
           for _, c in ipairs(corpseCache) do
             local L = c.lbl
@@ -956,7 +1077,7 @@ return function(api)
             local cpos = c.pos
             if c.root and c.root.Parent then cpos = c.root.Position end
             if cpos and L then
-              local showAI = c.isPlayer or F.corpse_ai
+              local showAI = (c.isPlayer and F.corpse_on) or (not c.isPlayer and F.corpse_ai)
               if showAI then
                 local d = (meHRP.Position - cpos).Magnitude
                 if d == d and d <= F.corpse_range then
@@ -991,7 +1112,7 @@ return function(api)
               local m = c.m
               local hum = m and m.Parent and m:FindFirstChildOfClass("Humanoid")
               if m and m.Parent and m:IsA("Model") and hum and hum.Health <= 0 then
-                local key = "c_" .. m:GetDebugId()
+                local key = glowKey(m, "c")
                 setGlow(m, c.isPlayer and F.glow_corpse_c or F.corpse_ai_col, true, "c")
                 seenGlow[key] = true
               end
@@ -1012,17 +1133,18 @@ return function(api)
             if it.kind == "drop" then want = F.loot_drop == true
             elseif it.kind == "quest" then want = F.loot_quest == true
             else want = F.loot_cont == true end -- cont + spawn
-            if want and it.pos and L then
+            if want and it.pos then
               local d = (meHRP.Position - it.pos).Magnitude
               if d == d and d <= F.loot_range then
                 nL = nL + 1
                 local sp, on = wts(it.pos)
                 -- container crates can hide their name while keeping the glow
-                local nameOk = (it.kind ~= "cont" and it.kind ~= "spawn") or F.loot_contname
-                if on and nameOk and onScreenPt(sp, vs) then
+                local prefix = it.kind == "drop" and "loot_drop" or (it.kind == "quest" and "loot_quest" or "loot_cont")
+                local nameOk, distOk = F[prefix .. "name"], F[prefix .. "dist"]
+                if L and on and (nameOk or distOk) and onScreenPt(sp, vs) then
                   local col = it.star and F.loot_hlcol or F.loot_col
                   local nm = (it.star and "* " or "") .. it.name
-                  L.Text = nm .. "  " .. math.floor(d + 0.5) .. "m"
+                  L.Text = (nameOk and nm or "") .. (distOk and ((nameOk and "  " or "") .. math.floor(d + 0.5) .. "m") or "")
                   L.Color = col
                   L.Size = it.star and 14 or 12
                   L.Position = V2(sp.X, sp.Y)
@@ -1051,6 +1173,28 @@ return function(api)
         end
       end
 
+      guarded("doors", function()
+        for _, entry in ipairs(doorCache) do
+          local label = entry.lbl
+          if label then label.Visible = false end
+          if F.door_glow and meHRP and entry.m.Parent and entry.root.Parent and doorLocked(entry.m) then
+            local pos = entry.root.Position
+            local distance = (pos - meHRP.Position).Magnitude
+            if distance <= F.door_range then
+              setGlow(entry.m, F.door_color, true, "door")
+              seenGlow[glowKey(entry.m, "door")] = true
+              local point, front = wts(pos)
+              if label and front and onScreenPt(point, vs) and (F.door_names or F.door_dist) then
+                label.Text = (F.door_names and ((entry.key and ("[KEY " .. entry.key .. "] ") or "[LOCKED] ") .. entry.name) or "")
+                  .. (F.door_dist and (" " .. math.floor(distance + 0.5) .. "m") or "")
+                label.Color = F.door_color; label.Position = point; label.Visible = true
+              end
+            end
+          end
+        end
+        if meHRP then interactDoor(meHRP) end
+      end)
+
       -- exits (persistent labels)
       if F.exit_on and meHRP then
         guarded("exits", function()
@@ -1062,7 +1206,7 @@ return function(api)
               if d == d and d <= F.exit_range then
                 local sp, on = wts(e.pos)
                 if on and onScreenPt(sp, vs) then
-                  L.Text = "EXIT " .. tostring(e.name) .. "  " .. math.floor(d + 0.5) .. "m"
+                  L.Text = "EXIT  " .. math.floor(d + 0.5) .. "m"
                   L.Color = F.exit_col
                   L.Position = V2(sp.X, sp.Y)
                   L.Visible = true
@@ -1081,7 +1225,9 @@ return function(api)
       if F.radar_on and meHRP then
         guarded("radar", function()
           local size = F.radar_size or 170
-          local pos = V2(vs.X - size - 16, vs.Y - size - 16)
+          local corner = F.radar_corner or "BottomRight"
+          local pos = V2(corner:find("Left") and 16 or vs.X - size - 16,
+            corner:find("Top") and 48 or vs.Y - size - 16)
           local bg = tshape("Square")
           -- Drawing.Color needs a Color3. The old {R=,G=,B=} tables threw,
           -- and the throw took the rest of the frame with it.
@@ -1139,7 +1285,7 @@ return function(api)
 
       -- aim
       aimOn = false
-      if F.aim_on and meHRP and not (F.aim_pause and hubOpen()) then
+      if F.aim_on and meHRP and not userInput:GetFocusedTextBox() and not (F.aim_pause and hubOpen()) then
         guarded("aim", function()
           local cap = math.rad(F.aim_fov or 15)
           local maxR = F.aim_range or 1200
@@ -1206,12 +1352,20 @@ return function(api)
             if now - aimSince >= (F.aim_delay or 0)
               and (hold == "always"
                 or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
-                or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))) then
+                or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))
+                or (hold == "custom" and F.aim_key and ((F.aim_key.EnumType == Enum.KeyCode and userInput:IsKeyDown(F.aim_key))
+                  or (F.aim_key.EnumType == Enum.UserInputType and userInput:IsMouseButtonPressed(F.aim_key))))) then
               -- frame-rate independent: the same Smoothness used to move
               -- twice as fast at 120fps as it did at 60
               local base = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
               local step = clamp(math.max(dt or (1 / 60), 1 / 480) * 60, 0.05, 4)
               local alpha = clamp(1 - (1 - base) ^ step, 0.01, 1)
+              if F.aim_mode == "Assist" then
+                local angle = math.acos(clamp(look:Dot((best - origin).Unit), -1, 1))
+                local dead = math.rad(F.aim_deadzone or 2)
+                if angle <= dead then alpha = 0
+                else alpha = math.min(alpha, math.rad(F.aim_strength or 35) * math.max(dt, 0) / angle) end
+              end
               camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(origin, best), alpha)
               aimOn = true
             end
@@ -1256,7 +1410,7 @@ return function(api)
 
       if statLbl and now - statTick > 2 then
         statTick = now
-        if F.fullbright then brightApply(true) end -- re-assert daylight
+        -- Lighting is maintained by change listeners, not periodic clock resets.
         pcall(function()
           statLbl.Set(("players %d - bots %d - bodies %d - loot %d%s"):format(
             nP, nB, nC, nL, aimOn and " - LOCK" or ""))
@@ -1271,6 +1425,8 @@ return function(api)
         end)
       end
     end)
+    finishTransient()
+    if not renderOk then dbg.err.render = (dbg.err.render or 0) + 1; dbg.last = tostring(renderError) end
   end))
 
   local pages = {}
@@ -1284,7 +1440,7 @@ return function(api)
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
-    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap }) do
+    for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap, doorMap }) do
       for m, o in pairs(maps) do
         if o.lbl then pcall(function() o.lbl:Remove() end) end
         maps[m] = nil
@@ -1329,22 +1485,22 @@ return function(api)
 
   local nav = api.Navigation or Tab:Navigation({ Name = "Project Delta" })
   local menuDefs = {
-    { "Players", "□", "Player ESP: boxes, names and weapons" },
-    { "Aim", "◎", "Camera aim, FOV and activation" },
-    { "Glow", "◇", "Highlights and outlines" },
-    { "Loot", "▣", "Containers, items and keywords" },
-    { "Bodies", "+", "Player and AI bodies" },
-    { "Bots", "◉", "Hostile AI settings" },
-    { "World", "◈", "NPCs, exits, radar and daylight" },
-    { "About", "i", "Status, diagnostics and unload" },
+    { "ESP", "□", "Players, highlights and AI" },
+    { "Aim", "◎", "Aim assistance" },
+    { "Loot", "▣", "Containers, items and locked doors" },
+    { "World", "◈", "Lighting, exits, radar and interaction" },
+    { "About", "i", "Status and recovery" },
   }
   for index, def in ipairs(menuDefs) do
     pages[def[1]] = nav:Page({ Id = "delta_" .. def[1]:lower(), Name = def[1],
       Icon = def[2], Tooltip = def[3], Order = index })
   end
-  pages.Players:Select()
+  pages.ESP:Select()
+  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" }, { Name = "Bots" } })
+  local aimTabs = pages.Aim:SubTabs({ { Name = "Aim-assist" }, { Name = "Silent Aim" } })
+  local lootTabs = pages.Loot:SubTabs({ { Name = "Containers" }, { Name = "Items" }, { Name = "Doors" }, { Name = "Filters" } })
 
-  local pSec = pages.Players:Section({ Name = "Players" })
+  local pSec = espTabs.Players:Section({ Name = "Players" })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
   if not HAS_DRAWING then
     pSec:Paragraph("WARNING: this executor has no Drawing API. Boxes, names, distance, tracers and the radar cannot render. Glow (Highlight) still works.")
@@ -1360,66 +1516,73 @@ return function(api)
   flagSlider(pSec, "Range", "esp_range", 200, 6000, { suf = "m" })
   flagColor(pSec, "Enemy color", "esp_enemy")
 
-  local aSec = pages.Aim:Section({ Name = "Aim" })
-  aSec:Paragraph("Camera lock only — no packets, no autofire. Smooth + small FOV keeps it human.")
-  flagToggle(aSec, "Aim lock", "aim_on")
+  local aSec = aimTabs["Aim-assist"]:Section({ Name = "Aim-assist" })
+  aSec:Paragraph("Assist limits camera correction per second and leaves a dead zone around the crosshair.")
+  flagDropdown(aSec, "Mode", "aim_mode", { "Assist", "Camera lock" })
+  flagSlider(aSec, "Assist turn speed", "aim_strength", 1, 180, { suf = "deg/s" })
+  flagSlider(aSec, "Assist dead zone", "aim_deadzone", 0, 10, { dec = 1, suf = "deg" })
+  flagToggle(aSec, "Enabled", "aim_on")
   flagDropdown(aSec, "Aim part", "aim_part", { "Head", "UpperTorso", "HumanoidRootPart" })
   flagSlider(aSec, "FOV", "aim_fov", 5, 45)
   flagSlider(aSec, "Max range", "aim_range", 100, 3000, { suf = "m", tip = "Never lock past this distance" })
   flagSlider(aSec, "Smoothness", "aim_smooth", 1, 100, { tip = "Higher = slower, more human" })
   flagSlider(aSec, "Target delay", "aim_delay", 0, 0.5, { dec = 2, suf = "s", tip = "Reaction delay on new targets" })
-  flagDropdown(aSec, "Trigger", "aim_hold", { "right", "left", "always" })
+  flagDropdown(aSec, "Trigger", "aim_hold", { "right", "left", "always", "custom" })
+  aSec:Keybind({ Name = "Custom aim key", Default = F.aim_key, Flag = "pd_aim_key",
+    Callback = function(v) F.aim_key = v end })
+  local silentSec = aimTabs["Silent Aim"]:Section({ Name = "Silent Aim" })
+  silentSec:Paragraph("Unavailable in this build: weapon integration has not been verified for the current game version.")
   flagDropdown(aSec, "Priority", "aim_prio", { "closest", "distance" })
   flagToggle(aSec, "Visible check", "aim_vis", "Skip targets behind walls")
   flagToggle(aSec, "FOV circle", "aim_circle")
   flagToggle(aSec, "Pause while hub open", "aim_pause")
 
-  local gSec = pages.Glow:Section({ Name = "Glow" })
+  local gSec = espTabs.Glow:Section({ Name = "Glow" })
   gSec:Paragraph("Client-side Highlights (see-through chams).")
   flagToggle(gSec, "Players", "glow_on")
-  flagToggle(gSec, "NPC", "glow_npc")
-  flagToggle(gSec, "Corpses", "glow_corpse")
   flagToggle(gSec, "Through walls", "glow_top")
   flagToggle(gSec, "Visible outline", "glow_vis",
     "Fat frame around targets NOT behind a wall (wall-checked)")
   flagSlider(gSec, "Outline thickness", "glow_visthick", 1, 6)
   flagColor(gSec, "Outline color", "glow_viscol")
   flagColor(gSec, "Player glow", "glow_enemy")
-  flagColor(gSec, "NPC glow", "glow_npc_c")
-  flagColor(gSec, "Corpse glow", "glow_corpse_c")
-  flagToggle(gSec, "Loot glow", "glow_loot",
-    "Highlight crates, dropped and quest items - nearest first")
-  flagSlider(gSec, "Loot glow slots", "glow_lootcap", 1, 10,
-    { tip = "Max simultaneous loot highlights (engine caps total highlights ~30)" })
-  flagColor(gSec, "Crate glow", "glow_cont")
-  flagColor(gSec, "Dropped glow", "glow_drop")
-  flagColor(gSec, "Quest glow", "glow_quest")
-  flagColor(gSec, "Star glow", "glow_star")
-
-  local lSec = pages.Loot:Section({ Name = "Loot" })
-  lSec:Paragraph("Containers, floor drops, quest items. Starred = keyword match.")
+  local lSec = lootTabs.Containers:Section({ Name = "Containers" })
   flagToggle(lSec, "Containers", "loot_cont")
-  flagToggle(lSec, "Dropped items", "loot_drop")
-  flagToggle(lSec, "Quest items", "loot_quest")
-  flagToggle(lSec, "Keyword star", "loot_hl")
-  flagToggle(lSec, "Container names", "loot_contname",
-    "Hide crate names but keep their glow")
-  lSec:TextBox({ Name = "Keywords", Placeholder = "card,key,defib,…", Default = F.loot_keys,
-    Tooltip = "Comma-separated, case-insensitive", Flag = "pd_loot_keys",
+  flagToggle(lSec, "Names", "loot_contname")
+  flagToggle(lSec, "Distance", "loot_contdist")
+  flagColor(lSec, "Glow color", "glow_cont")
+  local dropSec = lootTabs.Items:Section({ Name = "Dropped items" })
+  flagToggle(dropSec, "Dropped items", "loot_drop")
+  flagToggle(dropSec, "Names", "loot_dropname")
+  flagToggle(dropSec, "Distance", "loot_dropdist")
+  flagColor(dropSec, "Glow color", "glow_drop")
+  local questSec = lootTabs.Items:Section({ Name = "Quest items" })
+  flagToggle(questSec, "Quest items", "loot_quest")
+  flagToggle(questSec, "Names", "loot_questname")
+  flagToggle(questSec, "Distance", "loot_questdist")
+  flagColor(questSec, "Glow color", "glow_quest")
+  local commonLoot = lootTabs.Filters:Section({ Name = "Shared loot settings" })
+  flagToggle(commonLoot, "Loot glow", "glow_loot", "Applies to enabled loot categories")
+  flagSlider(commonLoot, "Highlight budget", "glow_lootcap", 1, 10)
+  flagSlider(commonLoot, "Max distance", "loot_range", 200, 4000, { suf = "m" })
+  flagToggle(commonLoot, "Keyword star", "loot_hl")
+  commonLoot:TextBox({ Name = "Keywords", Default = F.loot_keys, Flag = "pd_loot_keys",
     Callback = function(v) F.loot_keys = tostring(v or "") end })
-  flagSlider(lSec, "Max distance", "loot_range", 200, 4000, { suf = "m" })
-  flagColor(lSec, "Loot color", "loot_col")
-  flagColor(lSec, "Star color", "loot_hlcol")
+  flagColor(commonLoot, "Label color", "loot_col")
+  flagColor(commonLoot, "Star label", "loot_hlcol")
+  flagColor(commonLoot, "Star glow", "glow_star")
 
-  local bSec = pages.Bodies:Section({ Name = "Bodies" })
+  local bSec = espTabs.Bots:Section({ Name = "Bodies" })
   bSec:Paragraph("Lootable bodies: player corpses + AI corpses, distinct colors.")
   flagToggle(bSec, "Corpses", "corpse_on")
   flagToggle(bSec, "AI bodies", "corpse_ai")
   flagSlider(bSec, "Max distance", "corpse_range", 200, 4000, { suf = "m" })
   flagColor(bSec, "Player body", "corpse_col")
   flagColor(bSec, "AI body", "corpse_ai_col")
+  flagToggle(bSec, "Body glow", "glow_corpse")
+  flagColor(bSec, "Player body glow", "glow_corpse_c")
 
-  local wSec = pages.World:Section({ Name = "World" })
+  local wSec = pages.World:Section({ Name = "Lighting" })
   wSec:Toggle({ Name = "Fullbright", Desc = "Always daylight, no dark corners",
     Default = F.fullbright == true, Flag = "pd_fullbright",
     Tooltip = "Restores raid lighting on off/unload",
@@ -1427,29 +1590,63 @@ return function(api)
       F.fullbright = v == true
       brightApply(F.fullbright)
     end })
-  wSec:Paragraph("Bots are hostile AI (Faction). Traders are friendly NPC.")
-  local botSec = pages.Bots:Section({ Name = "Bots" })
+  local botSec = espTabs.Bots:Section({ Name = "Bots" })
   botSec:Paragraph("Hostile AI from AiZones (Bandits etc.) — separate from trader NPC.")
   flagToggle(botSec, "Bot ESP", "bot_esp")
   flagToggle(botSec, "Bot glow", "bot_glow")
   flagToggle(botSec, "Aim bots", "aim_bots")
   flagSlider(botSec, "Max distance", "bot_range", 200, 4000, { suf = "m" })
   flagColor(botSec, "Bot color", "bot_col")
-  flagToggle(wSec, "NPC (traders/bosses)", "npc_on")
-  flagSlider(wSec, "NPC distance", "npc_range", 200, 4000, { suf = "m" })
-  flagColor(wSec, "NPC color", "npc_col")
-  flagToggle(wSec, "Exits", "exit_on")
-  flagSlider(wSec, "Exit distance", "exit_range", 200, 6000, { suf = "m" })
-  flagColor(wSec, "Exit color", "exit_col")
-  flagToggle(wSec, "Radar", "radar_on")
-  flagSlider(wSec, "Radar range", "radar_range", 100, 2000, { suf = "m" })
-  flagSlider(wSec, "Radar size", "radar_size", 100, 320, { suf = "px" })
+  local npcSec = espTabs.Bots:Section({ Name = "Traders / NPC" })
+  flagToggle(npcSec, "Labels", "npc_on")
+  flagToggle(npcSec, "Glow", "glow_npc")
+  flagColor(npcSec, "Glow color", "glow_npc_c")
+  flagSlider(npcSec, "Max distance", "npc_range", 200, 4000, { suf = "m" })
+  flagColor(npcSec, "Label color", "npc_col")
+  local exitSec = pages.World:Section({ Name = "Exits" })
+  flagToggle(exitSec, "Exits", "exit_on")
+  flagSlider(exitSec, "Max distance", "exit_range", 200, 6000, { suf = "m" })
+  flagColor(exitSec, "Color", "exit_col")
+  local radarSec = pages.World:Section({ Name = "Radar" })
+  flagDropdown(radarSec, "Position", "radar_corner", { "TopLeft", "TopRight", "BottomLeft", "BottomRight" })
+  flagToggle(radarSec, "Radar", "radar_on")
+  flagSlider(radarSec, "Range", "radar_range", 100, 2000, { suf = "m" })
+  flagSlider(radarSec, "Size", "radar_size", 100, 320, { suf = "px" })
+
+  local doorSec = lootTabs.Doors:Section({ Name = "Locked doors" })
+  doorSec:Paragraph("Marks streamed doors that expose lock/key metadata. Unmarked doors may use a custom game controller.")
+  flagToggle(doorSec, "Locked-door glow", "door_glow")
+  flagToggle(doorSec, "Names", "door_names")
+  flagToggle(doorSec, "Distance", "door_dist")
+  flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
+  flagColor(doorSec, "Color", "door_color")
+  local doorActionSec = pages.World:Section({ Name = "Door interaction" })
+  doorActionSec:Paragraph("Hold the key: sends the same open packet as F, ~8/s, to the nearest door. Server lock checks still apply — pair with noclip to spam a locked door before the teleport-back.")
+  flagToggle(doorActionSec, "Door assist", "door_assist")
+  flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
+  doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
+    Callback = function(v) F.door_key = v end })
 
   local aboutSec = pages.About:Section({ Name = "About" })
-  aboutSec:Label("PROJECT DELTA - hub module v" .. MODULE_VERSION .. " (safe build)")
-  aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. No movement, no packets, no scripts touched — nothing for the server to fingerprint. Still: play sane, reports exist (PlayerReport).")
+  aboutSec:Label("PROJECT DELTA - hub module v" .. MODULE_VERSION .. "")
+  aboutSec:Paragraph("ESP + camera aim + glow + loot/corpses/exits/radar. Rendering depends on objects streamed to this client. Live compatibility must be checked on each map.")
   statLbl = aboutSec:Label("players 0 - bodies 0 - loot 0")
   dbgLbl = aboutSec:Label("loop - fps")
+  aboutSec:Button({ Name = "Rebuild overlays", Variant = "ghost", Callback = function()
+    freeTransient()
+    for player in pairs(pesc) do freeRig(player) end
+    rigRetry = {}
+    for _, map in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap, doorMap }) do
+      for object, record in pairs(map) do killDraw(record.lbl); map[object] = nil end
+    end
+    for _, cache in ipairs({ lootCache, corpseCache, npcCache, exitCache, botCache, doorCache }) do
+      for _, entry in ipairs(cache) do entry.lbl = nil end
+    end
+    for key, highlight in pairs(glowMap) do pcall(function() highlight:Destroy() end); glowMap[key] = nil end
+    HAS_DRAWING = pcall(function() local probe = Drawing.new("Square"); probe:Remove() end)
+    guarded("labels", syncLabelMaps)
+    Notify("Delta", HAS_DRAWING and "Overlays rebuilt" or "Drawing API unavailable", HAS_DRAWING and "ok" or "warn")
+  end })
   aboutSec:Button({ Name = "Text self-test", Variant = "ghost",
     Tooltip = "Draws 6 sample texts center-screen for 6s. Tell which rows you SEE.",
     Callback = function()
