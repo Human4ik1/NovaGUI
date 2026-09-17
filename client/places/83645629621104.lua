@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "2.2-safe"
+  local MODULE_VERSION = "2.4-noremote"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -504,11 +504,10 @@ return function(api)
   end
   local function flowSolve(puzzle)
     if not puzzle or not puzzle.Solution then return end
-    for _, ci in ipairs((function()
-      local idx = {}
-      for i = 1, #puzzle.Solution do idx[i] = i end
-      return idx
-    end)()) do
+    -- max speed, event-driven: no per-node/per-line sleeps. Lines are
+    -- written back-to-back and checkForWin runs immediately after each —
+    -- the win check itself drives the flow, not timers.
+    for ci = 1, #puzzle.Solution do
       if moduleDead or not F.flow_on then return end
       local solution = puzzle.Solution[ci]
       if solution then
@@ -540,12 +539,9 @@ return function(api)
         end
         puzzle.paths[ci] = {}
         for _, node in ipairs(ordered) do
-          if moduleDead or not F.flow_on then return end
           table.insert(puzzle.paths[ci], { row = node.row, col = node.col })
-          pcall(function() puzzle:updateGui() end)
-          task.wait(0.05)
         end
-        task.wait(0.5)
+        pcall(function() puzzle:updateGui() end)
         pcall(function() puzzle:checkForWin() end)
       end
     end
@@ -564,7 +560,9 @@ return function(api)
         local p = flowOrigNew(...)
         if F.flow_on then
           task.spawn(function()
-            task.wait(0.3)
+            -- one short yield so Init() finishes; afterwards zero pacing —
+            -- lines solve back-to-back at full speed
+            task.wait(0.15)
             if F.flow_on and not moduleDead then flowSolve(p) end
           end)
         end
@@ -605,9 +603,9 @@ return function(api)
     stamMod, stamOrig = nil, nil
   end
   -- --------------------------------------------------------------------------
-  -- Fix (the game's own repair remote, same as the prompt key)
+  -- Generator progress readout (for ESP/glow only — no repair calls here;
+  -- the server kicks for automated RF/RE, so repair is 100% manual now)
   -- --------------------------------------------------------------------------
-  local fixBusy, fixKeyCd = false, 0
   local function genProgress(e)
     if e.prog and e.prog.Parent then
       local ok, v = pcall(function() return e.prog.Value end)
@@ -615,82 +613,12 @@ return function(api)
     end
     return nil
   end
-  local function findNearestGen(range, skipDone)
-    local root = myHRP()
-    if not root then return nil end
-    local best, bestD = nil, range or math.huge
-    for _, e in ipairs(genCache) do
-      if e.m.Parent then
-        local d = (e.pos - root.Position).Magnitude
-        if d == d and d < bestD then
-          if not skipDone then
-            best, bestD = e, d
-          else
-            local p = genProgress(e)
-            if p == nil or p < 100 then best, bestD = e, d end
-          end
-        end
-      end
-    end
-    return best
-  end
-  local function findPrompt(gen)
-    local ok, pr = pcall(function()
-      local main = gen:FindFirstChild("Main")
-      local p = main and main:FindFirstChild("Prompt")
-      if p and p:IsA("ProximityPrompt") then return p end
-      return gen:FindFirstChildWhichIsA("ProximityPrompt", true)
-    end)
-    return ok and pr or nil
-  end
-  local function fixGenerator(entry, quiet)
-    -- SAFETY FIRST: the server kicks (267) for repair packets sent from
-    -- far away. Fire ONLY inside the prompt's own reach, exactly like a
-    -- hand on E. Anything farther returns "far" and touches nothing.
-    if fixBusy then return "busy" end
-    local remotes = entry.m:FindFirstChild("Remotes", true)
-    if not remotes then return "noremote" end
-    local root = myHRP()
-    if not root then return "n char" end
-    local prompt = findPrompt(entry.m)
-    local maxD = 10
-    if prompt then
-      local okD, md = pcall(function() return prompt.MaxActivationDistance end)
-      if okD and type(md) == "number" and md > 0 then maxD = md end
-    end
-    local dist = (entry.pos - root.Position).Magnitude
-    if dist ~= dist or dist > maxD + 2 then return "far", math.floor((dist ~= dist) and -1 or dist) end
-    fixBusy = true
-    -- watchdog: a hanging InvokeServer must never wedge the fixer forever
-    task.delay(5, function() fixBusy = false end)
-    task.spawn(function()
-      -- full manual flow, automated: hold the prompt like E, then the
-      -- game's own repair remote. Prompt-hold is what a hand repair does;
-      -- the remote alone is ignored without it.
-      if prompt and type(fireproximityprompt) == "function" then
-        pcall(fireproximityprompt, prompt)
-      end
-      pcall(function()
-        local rf = remotes:FindFirstChild("RF")
-        if rf then rf:InvokeServer() end
-      end)
-      for _ = 1, 2 do
-        task.wait(0.3)
-        pcall(function()
-          local re = remotes:FindFirstChild("RE")
-          if re then re:FireServer() end
-        end)
-      end
-      fixBusy = false
-    end)
-    return "ok"
-  end
 
   -- --------------------------------------------------------------------------
   -- Status
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
-  local statTick, scanTick, labelTick, auraTick, stamTick, nP, nK = 0, 0, 0, 0, 0, 0, 0
+  local statTick, scanTick, labelTick, stamTick, nP, nK = 0, 0, 0, 0, 0, 0
   local killerNear, killerDist = false, math.huge
 
   -- --------------------------------------------------------------------------
@@ -851,8 +779,14 @@ return function(api)
             for _, e in ipairs(cache) do
               if shown >= cap then return end
               if e.m.Parent and e.pos and (mp - e.pos).Magnitude <= ((cache == genCache) and (F.gen_range or 4000) or (F.item_range or 2500)) then
+                -- finished (100%) generators glow green, always
+                local gc = col
+                if cache == genCache then
+                  local p = genProgress(e)
+                  if p ~= nil and p >= 100 then gc = Color3.fromRGB(0, 255, 0) end
+                end
                 local key = glowKey(e.m, cache == genCache and "g" or "i")
-                setGlow(e.m, col, true, cache == genCache and "g" or "i", "loot")
+                setGlow(e.m, gc, true, cache == genCache and "g" or "i", "loot")
                 seenGlow[key] = true
                 shown = shown + 1
               end
@@ -884,14 +818,8 @@ return function(api)
         end)
       end
 
-      -- auto-fix aura (same remote as the prompt key, throttled)
-      if F.aura_on and meHRP and now - auraTick > (tonumber(F.aura_rate) or 3) then
-        auraTick = now
-        guarded("aura", function()
-          local g = findNearestGen(tonumber(F.aura_range) or 80, true)
-          if g then fixGenerator(g) end
-        end)
-      end
+      -- (repair remotes removed: the server kicks for automated RF/RE.
+      -- Repair is manual E + the minigame solver below.)
       if F.stam_on and now - stamTick > 0.5 then
         stamTick = now
         guarded("stam", stamApply)
@@ -984,7 +912,7 @@ return function(api)
   local nav = api.Navigation or Tab:Navigation({ Name = "Forsaken" })
   local menuDefs = {
     { "ESP", "□", "Killers, survivors, items, generators" },
-    { "Fix", "⚒", "Generator repair (watched!)" },
+    { "Fix", "⚒", "Minigame solver, stamina" },
     { "About", "i", "Status" },
   }
   for index, def in ipairs(menuDefs) do
@@ -1034,31 +962,7 @@ return function(api)
   flagColor(genSec, "Color", "gen_col")
 
   local fixSec = pages.Fix:Section({ Name = "Repair" })
-  fixSec:Paragraph("Holds the repair prompt like E, then the generator's own remote. Fires ONLY inside the prompt's own reach — distant repair packets are what got people kicked (267).")
-  fixSec:Button({ Name = "Fix nearest generator", Callback = function()
-    local g = findNearestGen(1e9, true)
-    if not g then Notify("Fix", "No unfinished generator found", "warn"); return end
-    local res, dist = fixGenerator(g)
-    if res == "ok" then Notify("Fix", "Repair sent → " .. g.name, "ok")
-    elseif res == "far" then Notify("Fix", "Get closer (" .. tostring(dist) .. "m)", "info")
-    elseif res == "busy" then Notify("Fix", "Repair in progress…", "info") end
-  end })
-  fixSec:Keybind({ Name = "Fix key", Default = F.fix_key, Flag = "fs_fix_key",
-    Callback = function(v) F.fix_key = v end }):OnPress(function()
-    local now = os.clock()
-    if now - fixKeyCd < 1 then return end
-    fixKeyCd = now
-    local g = findNearestGen(tonumber(F.aura_range) or 30, true)
-    if not g then Notify("Fix", "No unfinished generator in range", "info"); return end
-    local res, dist = fixGenerator(g)
-    if res == "ok" then Notify("Fix", "Repair sent → " .. g.name, "ok")
-    elseif res == "far" then Notify("Fix", "Get closer (" .. tostring(dist) .. "m)", "info") end
-  end)
-  local auraSec = pages.Fix:Section({ Name = "Auto-fix aura" })
-  auraSec:Paragraph("Repairs the nearest generator in radius on a timer. Convenient, noisy — use wisely.")
-  flagToggle(auraSec, "Auto-fix aura", "aura_on")
-  flagSlider(auraSec, "Radius", "aura_range", 10, 400, { suf = "m" })
-  flagSlider(auraSec, "Every", "aura_rate", 1, 15, { dec = 1, suf = "s" })
+  fixSec:Paragraph("Manual only now: automated repair calls (button, B key, aura) are REMOVED — the server kicks (267) for any automated RF/RE, even point-blank. Hold E yourself; the solver below plays the minigame for you.")
   local flowSec = pages.Fix:Section({ Name = "Minigame solver" })
   flowSec:Paragraph("Auto-solves the generator flow puzzle when it pops up. Hooks the game's solver table (restored on unload).")
   flowSec:Toggle({ Name = "Auto-solve flow puzzle", Default = F.flow_on == true, Flag = "fs_flow_on",
@@ -1073,7 +977,7 @@ return function(api)
 
   local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("FORSAKEN - hub module v" .. MODULE_VERSION)
-  aboutSec:Paragraph("Killer/survivor ESP + items + generators + repair. Eyes-only except Fix (own remote).")
+  aboutSec:Paragraph("Killer/survivor ESP + items + generators + minigame solver + stamina. Eyes-only: no repair remotes are ever sent.")
   statLbl = aboutSec:Label("players 0 · killers 0")
   dbgLbl = aboutSec:Label("loop - fps")
   aboutSec:Button({ Name = "Rebuild overlays", Variant = "ghost", Callback = function()
