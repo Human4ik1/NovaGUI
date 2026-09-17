@@ -803,6 +803,12 @@ return function(api)
     return nil
   end
   local doorPrevHeld, doorCooldown = false, 0
+  local function bindingDown(key)
+    if not key then return false end
+    if key.EnumType == Enum.KeyCode then return userInput:IsKeyDown(key) end
+    if key.EnumType == Enum.UserInputType then return userInput:IsMouseButtonPressed(key) end
+    return false
+  end
   local function interactDoor(root)
     local now = os.clock()
     local held = F.door_assist and bindingDown(F.door_key) and not userInput:GetFocusedTextBox() and not hubOpen()
@@ -837,9 +843,10 @@ return function(api)
         end)
         local dp = entry.root.Position
         local target = Vector3.new(dp.X + flat.X * side * depth, root.Position.Y, dp.Z + flat.Z * side * depth)
-        -- step through, face the door, knock 3 times from the inside
+        -- step through, face the door, knock from the inside: the first
+        -- packet goes out in the SAME frame as the step (before the server
+        -- can pull you back), two more follow in case the yank is instant.
         root.CFrame = CFrame.new(target, Vector3.new(dp.X, target.Y, dp.Z))
-        task.wait(0.03)
         for _ = 1, 3 do
           local p = root.Position
           pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
