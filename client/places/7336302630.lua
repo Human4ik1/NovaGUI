@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.16-lootglow"
+  local MODULE_VERSION = "2.17-loottab"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -1776,9 +1776,9 @@ return function(api)
       Icon = def[2], Tooltip = def[3], Order = index })
   end
   pages.ESP:Select()
-  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" }, { Name = "Bots" }, { Name = "LootGlow" } })
+  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" }, { Name = "Bots" } })
   local aimTabs = pages.Aim:SubTabs({ { Name = "Aim-assist" }, { Name = "Silent Aim" } })
-  local lootTabs = pages.Loot:SubTabs({ { Name = "Containers" }, { Name = "Items" }, { Name = "Doors" }, { Name = "Filters" } })
+  local lootTabs = pages.Loot:SubTabs({ { Name = "Containers" }, { Name = "Items" }, { Name = "Mines" }, { Name = "Doors" }, { Name = "Filters" }, { Name = "Scanner" } })
 
   local pSec = espTabs.Players:Section({ Name = "Players" })
   pSec:Paragraph("No teams here — everyone else is hostile. Eyes only, nothing replicated.")
@@ -1827,32 +1827,32 @@ return function(api)
   flagColor(gSec, "Outline color", "glow_viscol")
   flagColor(gSec, "Player glow", "glow_enemy")
 
-  -- LootGlow: every loot/mine visual in one place. Per category pick HOW
-  -- it shows: Off | ESP (wireframe boxes, unlimited) | GLOW (filled chams,
-  -- engine-capped ~10). e.g. mines on GLOW, crates on ESP — or the reverse.
-  local lgGeneral = espTabs.LootGlow:Section({ Name = "General" })
+  -- Loot visuals: everything lives in this Loot tab now (ESP mode =
+  -- unlimited wireframe boxes, GLOW = filled chams, engine-capped).
+  -- Per category pick HOW it shows, e.g. mines on GLOW, crates on ESP.
+  local lgGeneral = lootTabs.Scanner:Section({ Name = "General" })
   flagToggle(lgGeneral, "Loot visuals master", "glow_loot", "Kills every loot/mine visual at once")
   flagSlider(lgGeneral, "Loot max distance", "loot_range", 200, 4000, { suf = "m" })
   flagSlider(lgGeneral, "GLOW budget", "glow_lootcap", 1, 10,
     { tip = "How many closest GLOW-mode items get Highlights (ESP mode ignores this)" })
   flagColor(lgGeneral, "Label color", "loot_col")
   flagColor(lgGeneral, "Star label", "loot_hlcol")
-  local lgCont = espTabs.LootGlow:Section({ Name = "Containers" })
+  local lgCont = lootTabs.Containers:Section({ Name = "Containers" })
   flagMode(lgCont, "Show as", "lg_cont_mode")
   flagToggle(lgCont, "Names", "loot_contname")
   flagToggle(lgCont, "Distance", "loot_contdist")
   flagColor(lgCont, "Color", "glow_cont")
-  local lgDrop = espTabs.LootGlow:Section({ Name = "Dropped items" })
+  local lgDrop = lootTabs.Items:Section({ Name = "Dropped items" })
   flagMode(lgDrop, "Show as", "lg_drop_mode")
   flagToggle(lgDrop, "Names", "loot_dropname")
   flagToggle(lgDrop, "Distance", "loot_dropdist")
   flagColor(lgDrop, "Color", "glow_drop")
-  local lgQuest = espTabs.LootGlow:Section({ Name = "Quest items" })
+  local lgQuest = lootTabs.Items:Section({ Name = "Quest items" })
   flagMode(lgQuest, "Show as", "lg_quest_mode")
   flagToggle(lgQuest, "Names", "loot_questname")
   flagToggle(lgQuest, "Distance", "loot_questdist")
   flagColor(lgQuest, "Color", "glow_quest")
-  local lgMine = espTabs.LootGlow:Section({ Name = "Mines" })
+  local lgMine = lootTabs.Mines:Section({ Name = "Mines" })
   lgMine:Paragraph("Landmines + claymores. GLOW mode is capped to the closest ones.")
   flagMode(lgMine, "Show as", "lg_mine_mode")
   flagToggle(lgMine, "Names", "mine_names")
@@ -1862,7 +1862,7 @@ return function(api)
   flagColor(lgMine, "Color", "mine_col")
   -- scanner: what is actually around you right now, by category — set the
   -- modes above from live data instead of guessing
-  local lgScan = espTabs.LootGlow:Section({ Name = "Scanner" })
+  local lgScan = lootTabs.Scanner:Section({ Name = "Scanner" })
   local scanLbl = lgScan:Label("press Scan to see what's around")
   local bringList, bringPick = {}, nil
   local bringDrop
@@ -1902,7 +1902,7 @@ return function(api)
     end })
   -- bring: pull an unanchored item to your feet. Anchored crates are
   -- server-owned and won't move — the button tells you so honestly.
-  local lgBring = espTabs.LootGlow:Section({ Name = "Bring to me" })
+  local lgBring = lootTabs.Scanner:Section({ Name = "Bring to me" })
   lgBring:Paragraph("Works on physical (unanchored) drops near you — your client owns their physics. Anchored crates belong to the server and stay put.")
   bringDrop = lgBring:Dropdown({ Name = "Item", Options = { "—" }, Default = "—",
     Tooltip = "Fill with Scan nearby items first",
@@ -1928,8 +1928,8 @@ return function(api)
     end)
     Notify("Bring", ok and ("Pulled " .. target.name) or "Pull failed", ok and "ok" or "error")
   end })
-  -- NOTE: loot/mine visuals live in ESP > LootGlow now. This tab keeps
-  -- doors + keyword detection only.
+  -- NOTE: loot/mine visuals (modes, colors, scanner, bring) live in the
+  -- Containers / Items / Mines / Scanner subtabs of this same tab.
   local commonLoot = lootTabs.Filters:Section({ Name = "Keywords" })
   commonLoot:Paragraph("Star marks valuable loot by name in both ESP and GLOW modes.")
   flagToggle(commonLoot, "Keyword star", "loot_hl")
