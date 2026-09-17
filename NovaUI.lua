@@ -2130,8 +2130,18 @@ local function decVal(v)
   if v.t == "list" and type(v.v) == "table" then return v.v end
   if v.t == "enum" then
     if v.enum then
-      local enum = v.enum == "Enum.UserInputType" and Enum.UserInputType or Enum.KeyCode
-      return enum[v.v]
+      -- encVal stores tostring(EnumType): "KeyCode" / "UserInputType" (never
+      -- with the "Enum." prefix). Resolve against the right family; an
+      -- unknown/stale member falls back to the bare name so the keybind
+      -- setter can resolve it across both families instead of throwing.
+      local et = tostring(v.enum)
+      local enum
+      if et == "UserInputType" or et == "Enum.UserInputType" then enum = Enum.UserInputType
+      elseif et == "KeyCode" or et == "Enum.KeyCode" then enum = Enum.KeyCode end
+      if enum then
+        local ok, item = pcall(function() return enum[v.v] end)
+        if ok and item ~= nil then return item end
+      end
     end
     return v.v -- legacy keybinds stored only the name
   end
