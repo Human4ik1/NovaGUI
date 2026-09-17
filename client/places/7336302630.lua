@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.8-delta"
+  local MODULE_VERSION = "2.9-phasewalk"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -874,8 +874,10 @@ return function(api)
           prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
           if dot < 1.0 then
-            -- approach fast, then STOP 1m past the middle and hold it
-            local step = 10 / 60
+            -- approach at legit walk speed: your manual noclip passes were
+            -- done at 16/s and worked — slower only gives the yank-back
+            -- more frames to win.
+            local step = 16 / 60
             root.CFrame = CFrame.new(
               Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
           else
