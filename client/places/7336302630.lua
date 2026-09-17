@@ -830,20 +830,30 @@ return function(api)
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
       local ok, err = pcall(function()
-        local dc = door.root.CFrame
-        local flat = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
-        if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, 1) end
-        flat = flat.Unit
-        local toPl = root.Position - door.root.Position
-        local dot = toPl.X * flat.X + toPl.Z * flat.Z
-        local side = (dot > 0) and -1 or 1 -- far side from the player
-        local depth = 3.5
+        -- through-direction = YOUR approach line, not the part's LookVector
+        -- (door parts are often rotated along the wall, which used to drop
+        -- you beside the door instead of behind it). You walk at the door
+        -- facing it, so continuing that line lands you right behind it.
+        local dp = door.root.Position
+        local toDoor = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
+        local dir
+        if toDoor.Magnitude > 0.05 then
+          dir = toDoor.Unit
+        else
+          local dc = door.root.CFrame
+          dir = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
+          if dir.Magnitude < 0.05 then dir = Vector3.new(0, 0, 1) end
+          dir = dir.Unit
+        end
+        -- right up against the far face: half the door thickness + body
+        -- margin. Close enough to touch, far enough not to clip inside it.
+        local depth = 2
         pcall(function()
           local sz = door.root.Size
-          depth = math.max(sz.X, sz.Z) / 2 + 2
+          depth = math.max(sz.X, sz.Z) / 2 + 1.5
+          if depth < 1.8 then depth = 1.8 end
         end)
-        local dp = door.root.Position
-        local target = Vector3.new(dp.X + flat.X * side * depth, root.Position.Y, dp.Z + flat.Z * side * depth)
+        local target = Vector3.new(dp.X + dir.X * depth, root.Position.Y, dp.Z + dir.Z * depth)
         -- pin the turn: while movement keys are held the Humanoid re-faces
         -- the walk direction every frame and would instantly undo our CFrame,
         -- so AutoRotate goes off for the burst (restored right after).
@@ -864,11 +874,12 @@ return function(api)
           end
         end)
         -- knock from the inside: the first packet goes out in the SAME frame
-        -- as the step (before the server can pull you back), two more follow
-        for _ = 1, 3 do
+        -- as the step (before the server can pull you back), three more
+        -- follow in case the yank is instant.
+        for _ = 1, 4 do
           local p = root.Position
           pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
-          task.wait(0.05)
+          task.wait(0.04)
         end
         task.wait(0.15)
         if hum then pcall(function() hum.AutoRotate = autoWas end) end
