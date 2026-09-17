@@ -107,6 +107,7 @@ return function(api)
     loot_dropname = true, loot_questname = true, loot_contdist = false, loot_dropdist = true, loot_questdist = true,
     door_glow = false, door_names = true, door_dist = true, door_range = 200,
     door_color = Color3.fromRGB(255, 195, 70), door_assist = false, door_reach = 8,
+    door_knock = true,
     door_key = Enum.KeyCode.H,
     aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.UserInputType.MouseButton2,
   }
@@ -855,10 +856,9 @@ return function(api)
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
-        -- exit point: 3m past the middle along the walk line. Measured
-        -- from the LIVE position every frame, so a server yank-back just
-        -- means more walking instead of an early stop mid-slab.
-        local exitPt = Vector3.new(dp.X + dir0.X * 3, root.Position.Y, dp.Z + dir0.Z * 3)
+        -- exit point: 1.5m past the middle along the walk line. You press
+        -- H standing right against the door, so no need to march on.
+        local exitPt = Vector3.new(dp.X + dir0.X * 1.5, root.Position.Y, dp.Z + dir0.Z * 1.5)
         local t0, lastFire = os.clock(), 0
         while os.clock() - t0 < 4 do
           if not root.Parent then break end
@@ -880,7 +880,10 @@ return function(api)
             end
           end)
           local now = os.clock()
-          if now - lastFire >= 0.06 then
+          -- auto-knock can be switched off (World → Door interaction) so you
+          -- can mash the real F yourself mid-walk and prove the mechanic
+          -- before trusting the automation.
+          if F.door_knock ~= false and now - lastFire >= 0.06 then
             lastFire = now
             local p = root.Position
             pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
@@ -1696,8 +1699,10 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you straight through it and spams the same open packet as F the whole way. Walks until 3m past the door (max ~4s) — server yank-backs just mean more walking.")
+  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you just past it and — if Auto knock is on — spams the same open packet as F the whole way. Turn Auto knock OFF to walk through and mash the real F yourself first.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
+  flagToggle(doorActionSec, "Auto knock", "door_knock",
+    "Fire the open packet while walking — turn OFF to mash the real F yourself and verify the trick works")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
     Callback = function(v) F.door_key = v end })
