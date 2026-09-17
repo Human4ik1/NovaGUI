@@ -102,7 +102,7 @@ return function(api)
     corpse_ai_col = Color3.fromRGB(200, 170, 60),
     corpse_range = 2500,
     npc_on = false, npc_col = Color3.fromRGB(150, 160, 170), npc_range = 2500,
-    exit_on = false, exit_col = Color3.fromRGB(110, 230, 130), exit_range = 4000,
+    exit_on = false, exit_col = Color3.fromRGB(110, 230, 130), exit_range = 4000, exit_near = 80,
     radar_on = false, radar_range = 800, radar_size = 170, radar_corner = "BottomRight",
     loot_dropname = true, loot_questname = true, loot_contdist = false, loot_dropdist = true, loot_questdist = true,
     door_glow = false, door_names = true, door_dist = true, door_range = 200,
@@ -805,7 +805,8 @@ return function(api)
     local now = os.clock()
     local held = F.door_assist and bindingDown(F.door_key) and not userInput:GetFocusedTextBox() and not hubOpen()
     if not held then return end
-    if now - doorSpamT < 0.12 then return end -- ~8 packets/s
+    if now - doorSpamT < 0.06 then return end -- ~16 packets/s: the noclip
+    -- window before the teleport-back is only a few frames, so volume matters
     doorSpamT = now
     local nearest, best = nil, tonumber(F.door_reach) or 8
     for _, entry in ipairs(doorCache) do
@@ -1159,7 +1160,11 @@ return function(api)
                   local gc = it.star and F.glow_star
                     or (it.kind == "drop" and F.glow_drop
                       or (it.kind == "quest" and F.glow_quest or F.glow_cont))
-                  local key = "l_" .. it.m:GetDebugId()
+                  -- seen key MUST match setGlow's internal glowKey(model,"l"):
+                  -- a GetDebugId-based key never matched, so gcGlow destroyed
+                  -- every loot highlight in the same frame it was created and
+                  -- crate/item glow never rendered at all.
+                  local key = glowKey(it.m, "l")
                   setGlow(it.m, gc, true, "l", "loot")
                   seenGlow[key] = true
                 end
@@ -1203,7 +1208,9 @@ return function(api)
             if L then L.Visible = false end
             if e.pos and L then
               local d = (meHRP.Position - e.pos).Magnitude
-              if d == d and d <= F.exit_range then
+              -- the game shows its own exit icon up close: hide ours inside
+              -- exit_near so there is always exactly ONE exit label.
+              if d == d and d <= F.exit_range and d >= (F.exit_near or 0) then
                 local sp, on = wts(e.pos)
                 if on and onScreenPt(sp, vs) then
                   L.Text = "EXIT  " .. math.floor(d + 0.5) .. "m"
@@ -1606,10 +1613,12 @@ return function(api)
   local exitSec = pages.World:Section({ Name = "Exits" })
   flagToggle(exitSec, "Exits", "exit_on")
   flagSlider(exitSec, "Max distance", "exit_range", 200, 6000, { suf = "m" })
+  flagSlider(exitSec, "Hide when closer than", "exit_near", 0, 500,
+    { suf = "m", tip = "The game shows its own exit icon up close — hide ours inside this range so only one label is visible" })
   flagColor(exitSec, "Color", "exit_col")
   local radarSec = pages.World:Section({ Name = "Radar" })
-  flagDropdown(radarSec, "Position", "radar_corner", { "TopLeft", "TopRight", "BottomLeft", "BottomRight" })
   flagToggle(radarSec, "Radar", "radar_on")
+  flagDropdown(radarSec, "Position", "radar_corner", { "TopLeft", "TopRight", "BottomLeft", "BottomRight" })
   flagSlider(radarSec, "Range", "radar_range", 100, 2000, { suf = "m" })
   flagSlider(radarSec, "Size", "radar_size", 100, 320, { suf = "px" })
 
@@ -1621,7 +1630,7 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("Hold the key: sends the same open packet as F, ~8/s, to the nearest door. Server lock checks still apply — pair with noclip to spam a locked door before the teleport-back.")
+  doorActionSec:Paragraph("Hold the key: spams the same open packet as F (~16/s) at the nearest door. Key/lock checks run on the server: a locked door opens only with its key or FROM INSIDE — noclip through, hold H, the spam lands before the teleport-back kicks in.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
