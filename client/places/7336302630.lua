@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.13-glow"
+  local MODULE_VERSION = "2.14-glowfix"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -426,7 +426,17 @@ return function(api)
             if mine then
               seen[v] = true
               local cf = select(1, boxOf(v))
-              if cf then found[#found + 1] = { m = v, pos = cf.Position, name = v.Name } end
+              if cf then
+                -- NoCollision holds MIRROR copies of the same mines: same
+                -- spot, separate instance. Without a position dedupe every
+                -- mine eats TWO glow slots + draws a double label, and half
+                -- the budget glows invisible copies.
+                local dup = false
+                for _, e in ipairs(found) do
+                  if (e.pos - cf.Position).Magnitude < 2 then dup = true break end
+                end
+                if not dup then found[#found + 1] = { m = v, pos = cf.Position, name = v.Name } end
+              end
             end
           end
         end
@@ -1003,6 +1013,40 @@ return function(api)
       glowUsedEntity, glowUsedLoot = 0, 0 -- per-frame budget reset, both pools
       nP, nC, nL, nB = 0, 0, 0, 0
 
+      -- mines FIRST in the entity pool (before players/bots/corpses):
+      -- step-on-it hazards beat decoration. Nearest-first capped, so the
+      -- closest mines always win slots no matter how crowded the server is.
+      if (F.mine_glow or F.mine_names or F.mine_dist) and meHRP then
+        guarded("mines", function()
+          local cap = clamp(math.floor(F.mine_cap or 8), 1, 10)
+          local shown = 0
+          for _, entry in ipairs(mineCache) do
+            local label = entry.lbl
+            if label then label.Visible = false end
+            if entry.m and entry.m.Parent and entry.pos then
+              local d = (meHRP.Position - entry.pos).Magnitude
+              if d == d and d <= (F.mine_range or 400) then
+                if F.mine_glow and shown < cap then
+                  setGlow(entry.m, F.mine_col, true, "mine")
+                  seenGlow[glowKey(entry.m, "mine")] = true
+                  shown = shown + 1
+                end
+                local point, front = wts(entry.pos)
+                if label and front and onScreenPt(point, vs) and (F.mine_names or F.mine_dist) then
+                  label.Text = (F.mine_names and ("[MINE] " .. entry.name) or "")
+                    .. (F.mine_dist and (" " .. math.floor(d + 0.5) .. "m") or "")
+                  label.Color = F.mine_col; label.Position = point; label.Visible = true
+                end
+              end
+            end
+          end
+        end)
+      else
+        for _, o in pairs(mineMap) do
+          if o.lbl then pcall(function() o.lbl.Visible = false end) end
+        end
+      end
+
       -- players (persistent rigs: props updated, hidden when invalid)
       if meHRP then
         -- nearest-first: the 20-slot entity glow budget must go to the
@@ -1356,38 +1400,6 @@ return function(api)
         end
         if meHRP then interactDoor(meHRP) end
       end)
-
-      -- mines (persistent labels + entity-pool glow, nearest-first capped)
-      if (F.mine_glow or F.mine_names or F.mine_dist) and meHRP then
-        guarded("mines", function()
-          local cap = clamp(math.floor(F.mine_cap or 8), 1, 10)
-          local shown = 0
-          for _, entry in ipairs(mineCache) do
-            local label = entry.lbl
-            if label then label.Visible = false end
-            if entry.m and entry.m.Parent and entry.pos then
-              local d = (meHRP.Position - entry.pos).Magnitude
-              if d == d and d <= (F.mine_range or 400) then
-                if F.mine_glow and shown < cap then
-                  setGlow(entry.m, F.mine_col, true, "mine")
-                  seenGlow[glowKey(entry.m, "mine")] = true
-                  shown = shown + 1
-                end
-                local point, front = wts(entry.pos)
-                if label and front and onScreenPt(point, vs) and (F.mine_names or F.mine_dist) then
-                  label.Text = (F.mine_names and ("[MINE] " .. entry.name) or "")
-                    .. (F.mine_dist and (" " .. math.floor(d + 0.5) .. "m") or "")
-                  label.Color = F.mine_col; label.Position = point; label.Visible = true
-                end
-              end
-            end
-          end
-        end)
-      else
-        for _, o in pairs(mineMap) do
-          if o.lbl then pcall(function() o.lbl.Visible = false end) end
-        end
-      end
 
       -- exits (persistent labels)
       if F.exit_on and meHRP then
