@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.11-headlean"
+  local MODULE_VERSION = "2.13-glow"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -109,7 +109,6 @@ return function(api)
     loot_dropname = true, loot_questname = true, loot_contdist = false, loot_dropdist = true, loot_questdist = true,
     door_glow = false, door_names = true, door_dist = true, door_range = 200,
     door_color = Color3.fromRGB(255, 195, 70), door_assist = false, door_reach = 8,
-    door_knock = true,
     door_key = Enum.KeyCode.H,
     aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.UserInputType.MouseButton2,
   }
@@ -388,6 +387,16 @@ return function(api)
         end
       end
     end
+    -- nearest-first so close doors win any shared glow budget
+    local me = myHRP()
+    if me then
+      local mp = me.Position
+      table.sort(found, function(a, b)
+        local da = a.pos and (a.pos - mp).Magnitude or 1e9
+        local db = b.pos and (b.pos - mp).Magnitude or 1e9
+        return da < db
+      end)
+    end
     doorCache = found
   end
   local function scanMines()
@@ -602,6 +611,22 @@ return function(api)
         local db = b.pos and (b.pos - myPos).Magnitude or 1e9
         return da < db
       end)
+      -- same nearest-first for every other glow mouth: entity budget is
+      -- shared, closest bodies/bots/traders win the slots
+      local function epos(e)
+        if e.pos then return e.pos end
+        local r = e.root or e.hrp
+        if r and r.Parent then return r.Position end
+        return nil
+      end
+      for _, c in ipairs({ corpseCache, npcCache, botCache }) do
+        table.sort(c, function(a, b)
+          local pa, pb = epos(a), epos(b)
+          local da = pa and (pa - myPos).Magnitude or 1e9
+          local db = pb and (pb - myPos).Magnitude or 1e9
+          return da < db
+        end)
+      end
     end
     if moduleDead then return end
     lootCache, corpseCache, npcCache, exitCache, botCache = loot, corpses, npcs, exits, bots
@@ -650,8 +675,8 @@ return function(api)
     sync(npcCache, npcMap, "model", F.npc_on, F.npc_range, 12)
     sync(exitCache, exitMap, "part", F.exit_on, F.exit_range, 14)
     sync(botCache, botMap, "model", F.bot_esp, F.bot_range, 13)
-    sync(doorCache, doorMap, "m", F.door_glow and (F.door_names or F.door_dist), F.door_range, 13)
-    sync(mineCache, mineMap, "m", F.mine_glow and (F.mine_names or F.mine_dist), F.mine_range, 13)
+    sync(doorCache, doorMap, "m", (F.door_names or F.door_dist), F.door_range, 13)
+    sync(mineCache, mineMap, "m", (F.mine_names or F.mine_dist), F.mine_range, 13)
   end
 
   -- --------------------------------------------------------------------------
@@ -836,23 +861,12 @@ return function(api)
     return false
   end
 
-  -- Door phase+open: Delta checks key/side on the SERVER, so spamming the
-  -- remote from outside a locked door is pointless (the server just says no).
-  -- What works — the manual trick, automated: on key PRESS (not hold, no
-  -- loops) step once THROUGH the door plane to the far side, face the door
-  -- like the F prompt wants, and fire 3 open packets from the inside
-  -- position. The server pulls you back a moment later, but the door is
-  -- already opening and stays open. No hooks, no key simulation.
-  local doorRem
-  local function getDoorRem()
-    if doorRem and doorRem.Parent then return doorRem end
-    local ok, rem = pcall(function()
-      return game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 3):WaitForChild("Door", 3)
-    end)
-    if ok and rem then doorRem = rem; return rem end
-    return nil
-  end
-  local doorPrevHeld, doorCooldown = false, 0
+  -- Door walk (manual-F edition): ZERO automatic packets — you press F
+  -- yourself. On H: universal-style noclip on (originals saved, restored
+  -- at the end, exactly like the Universal tab), aim-lock the door middle,
+  -- slow native walk to just past the middle, hold ~6s for your F mashing,
+  -- then everything restores. No remotes, no hooks, no simulation.
+  local doorPrevHeld, doorCooldown, doorBusy = false, 0, false
   local function bindingDown(key)
     if not key then return false end
     if key.EnumType == Enum.KeyCode then return userInput:IsKeyDown(key) end
@@ -867,6 +881,7 @@ return function(api)
     if not press then return end
     if now - doorCooldown < 1 then return end
     doorCooldown = now
+    if doorBusy then Notify("Doors", "Walk already in progress", "info"); return end
     local nearest, best = nil, tonumber(F.door_reach) or 8
     for _, entry in ipairs(doorCache) do
       if entry.m and entry.m.Parent and entry.root and entry.root.Parent then
@@ -875,23 +890,12 @@ return function(api)
       end
     end
     if not nearest then Notify("Doors", "No door close enough — get nearer", "info"); return end
-    local rem = getDoorRem()
-    if not rem then Notify("Doors", "Door remote not found", "warn"); return end
+    doorBusy = true
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
-      -- the server expects the door MODEL (captured format): entry.m can be
-      -- a bare part when the scan matched one — climb to its model, or the
-      -- packet addresses the wrong object and dies silently.
-      local doorObj = door.m
-      if doorObj and doorObj:IsA("BasePart") then
-        doorObj = doorObj:FindFirstAncestorOfClass("Model") or doorObj
-      end
-      if not doorObj then doorObj = door.m end
       local ok, err = pcall(function()
-        -- aim at the DOOR'S MIDDLE, not entry.root: the scan keeps the
-        -- first BasePart it finds, which is often the Hinge at the side
-        -- of the doorway — walking at it phases you through the wall
-        -- next to the door. Bounding-box center is the true middle.
+        -- aim at the DOOR'S MIDDLE: the scan keeps the first BasePart it
+        -- finds, often the Hinge at the side — bbox center is the doorway.
         local boxCF = select(1, boxOf(door.m))
         local dp = (boxCF and boxCF.Position) or door.root.Position
         local dir0 = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
@@ -902,6 +906,7 @@ return function(api)
         end
         dir0 = dir0.Unit
         local ch = myChar()
+        -- universal-style noclip: remember every part's real state first
         local parts = {}
         if ch then
           for _, p in ipairs(ch:GetDescendants()) do
@@ -909,51 +914,35 @@ return function(api)
           end
         end
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        -- NOTE: AutoRotate stays untouched — Humanoid:Move faces the walk
-        -- direction by itself, and the rotation pin below preserves
-        -- position (no teleports involved anywhere in this walk).
-        -- HEAD LEAN: the server judges inside/outside by your replicated
-        -- HEAD, not the root — a head parked 1m past the slab reads as
-        -- "inside" while the body stays put (this exact stretched pose
-        -- happened by accident and opened doors with plain F). So: pin the
-        -- head through the door every frame, spam packets addressed from
-        -- the root as usual. No joint is broken — pinning stops at the end
-        -- and the neck re-seats itself.
+        -- head stays leaned a meter past the slab the whole time: with the
+        -- head inside, the manual F prompt behaves like the inside case
         local head = ch and ch:FindFirstChild("Head")
         local headTarget = nil
         if head and head:IsA("BasePart") then
           headTarget = Vector3.new(dp.X + dir0.X * 1.0, head.Position.Y, dp.Z + dir0.Z * 1.0)
         end
-        -- walk ENDS parked in the slab middle (dot ~0), not past it: the
-        -- body sits inside the doorway, the leaned head a meter into the
-        -- room. Nothing marches on to the back wall.
-        local t0, prevDot, insideT, knockAlt = os.clock(), nil, nil, 0
-        local finished = false
-        while os.clock() - t0 < 5 and not finished do
+        local t0 = os.clock()
+        local arrived, finished = false, false
+        while os.clock() - t0 < 14 and not finished do
           if not root.Parent then break end
           local rp = root.Position
           local rel = Vector3.new(rp.X - dp.X, 0, rp.Z - dp.Z)
           local dot = rel.X * dir0.X + rel.Z * dir0.Z
-          if F.door_knock ~= false and prevDot ~= nil and prevDot <= 0 and dot > 0 then
-            for _ = 1, 2 do
-              local p = root.Position
-              pcall(function() rem:FireServer(doorObj, 0, p.X, p.Y, p.Z) end)
-            end
-          end
-          prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
-          if dot < -0.2 then
-            -- NATIVE walk, not CFrame driving: the humanoid itself steps
-            -- through (noclip holds collisions off), exactly like the
-            -- Universal noclip you walk with by hand. CFrame-driving fought
-            -- physics + server every frame and read as teleporting.
+          if dot < 0.15 then
+            -- SLOW native walk (4/s): the humanoid steps by itself,
+            -- collisions held off — same feel as hand-driven noclip
             if hum and hum.Parent then pcall(function() hum:Move(dir0, false) end) end
             root.CFrame = CFrame.new(rp, look) -- rotation only, pos kept
           else
-            if not insideT then insideT = os.clock() end
-            if os.clock() - insideT > 1.5 then finished = true end
+            if not arrived then
+              arrived = true; t0 = os.clock()
+              Notify("Doors", "In position — mash F", "ok")
+            end
+            -- hold ~6s inside for your F mashing, then release everything
+            if os.clock() - t0 > 6 then finished = true end
             if hum and hum.Parent then pcall(function() hum:Move(Vector3.new(0, 0, 0), false) end) end
-            root.CFrame = CFrame.new(rp, look) -- hold the middle, keep facing
+            root.CFrame = CFrame.new(rp, look)
           end
           if head and head.Parent and headTarget then
             pcall(function()
@@ -971,16 +960,6 @@ return function(api)
               cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
             end
           end)
-          -- knock the WHOLE pass, alternating action 0/1: we cloned the
-          -- OUTSIDE (rejected) packet and never saw what the client sends
-          -- on a real inside open — if that uses action 1, 0-only spam
-          -- could never work. Both are the same remote/shape as F.
-          if F.door_knock ~= false then
-            knockAlt = (knockAlt == 0) and 1 or 0
-            local p = root.Position
-            local act = knockAlt
-            pcall(function() rem:FireServer(doorObj, act, p.X, p.Y, p.Z) end)
-          end
           task.wait()
         end
         for p, v in pairs(parts) do
@@ -988,7 +967,8 @@ return function(api)
         end
         if hum and hum.Parent then pcall(function() hum:Move(Vector3.new(0, 0, 0), false) end) end
       end)
-      if ok then Notify("Doors", "Phase walk → " .. tostring(nearest.name), "ok")
+      doorBusy = false
+      if ok then Notify("Doors", "Walk done → " .. tostring(nearest.name), "info")
       else Notify("Doors", tostring(err), "warn") end
     end)
   end
@@ -1025,7 +1005,22 @@ return function(api)
 
       -- players (persistent rigs: props updated, hidden when invalid)
       if meHRP then
-        for _, pl in ipairs(players:GetPlayers()) do
+        -- nearest-first: the 20-slot entity glow budget must go to the
+        -- closest players, not to whoever tops the player list — otherwise
+        -- far players silently eat the slots and nearby ones stay dark.
+        local plist = players:GetPlayers()
+        if F.glow_on and #plist > 1 then
+          local mp = meHRP.Position
+          local dist = {}
+          for _, pl in ipairs(plist) do
+            local ch = pl.Character
+            if not ch or not ch.Parent then ch = workspace:FindFirstChild(pl.Name) end
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            dist[pl] = (hrp and (hrp.Position - mp).Magnitude) or 1e9
+          end
+          table.sort(plist, function(a, b) return dist[a] < dist[b] end)
+        end
+        for _, pl in ipairs(plist) do
           if pl ~= LP then
             local playerOk = guarded("players", function()
               -- rigs are 14 Drawing objects each: build one only when the
@@ -1616,6 +1611,11 @@ return function(api)
           statLbl.Set(("players %d - bots %d - bodies %d - loot %d%s"):format(
             nP, nB, nC, nL, aimOn and " - LOCK" or ""))
           local parts = { ("loop %dfps"):format(dbg.fps) }
+          -- glow budget pressure: engine renders ~31 Highlights total
+          -- (20 entity + 10 loot pools). If E hits 20, farther objects
+          -- legitimately get nothing — raise nothing, walk closer.
+          table.insert(parts, ("glow E%d/20 L%d/10"):format(
+            math.min(glowUsedEntity, 99), math.min(glowUsedLoot, 99)))
           for _, sec in ipairs({ "scan", "players", "npc", "corpse", "corpseGlow", "loot", "exits", "radar", "aim", "hud" }) do
             if dbg.err[sec] then
               table.insert(parts, sec .. "!" .. dbg.err[sec])
@@ -1832,10 +1832,8 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you through at 10 m/s and — if Auto knock is on — fires the open packet only once past the slab (~33/s, double-knock on the crossing frame). Outside packets are pointless: the server rejects them.")
+  doorActionSec:Paragraph("PRESS H once: noclips you (Universal-style), aim-locks the door middle and slowly walks you just past it, then holds ~6s. NO automatic packets — you mash the real F yourself while inside.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
-  flagToggle(doorActionSec, "Auto knock", "door_knock",
-    "Fire the open packet while walking — turn OFF to mash the real F yourself and verify the trick works")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
     Callback = function(v) F.door_key = v end })
