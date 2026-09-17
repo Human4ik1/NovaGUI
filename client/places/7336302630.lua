@@ -18,7 +18,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "2.18-dedupe"
+  local MODULE_VERSION = "2.19-lists"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
