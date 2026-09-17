@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.3-veil"
+  local MODULE_VERSION = "1.4-input"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -529,6 +529,12 @@ return function(api)
   end
   reg(runService.Heartbeat:Connect(mouseForce))
   reg(runService.Stepped:Connect(mouseForce))
+  -- the lock is re-applied on INPUT events (mouse move re-locks between
+  -- frames — that's why it holds while dead and dies while playing), so
+  -- counter-force on every input event too, not just every frame.
+  reg(userInput.InputBegan:Connect(function() mouseForce() end))
+  reg(userInput.InputChanged:Connect(function() mouseForce() end))
+  reg(userInput.InputEnded:Connect(function() mouseForce() end))
   reg({ Disconnect = function()
     pcall(function() runService:UnbindFromRenderStep("HumaMouseUnlock") end)
   end })
