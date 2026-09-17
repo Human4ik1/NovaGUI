@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.2-unlock"
+  local MODULE_VERSION = "1.3-veil"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -469,6 +469,38 @@ return function(api)
   local statLbl, dbgLbl
   local statTick, nP = 0, 0
   local lastMenu, savedMouse = nil, nil
+  -- click veil: fullscreen invisible button UNDER our window (DisplayOrder
+  -- 40 < Nova's 50). Free cursor alone is not enough: clicks landing on
+  -- bare game view are NOT consumed, so the game fires its gun under the
+  -- menu. The veil eats every click outside the menu (menu itself is on
+  -- top and keeps working). Keyboard is untouched — RightShift closes fine.
+  local veilBtn = nil
+  pcall(function()
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "HumaVeil"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    sg.DisplayOrder = 40
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    local vb = Instance.new("TextButton")
+    vb.Name = "Veil"
+    vb.Text = ""
+    vb.BackgroundTransparency = 1
+    vb.BorderSizePixel = 0
+    vb.AutoButtonColor = false
+    vb.Active = true
+    vb.Size = UDim2.fromScale(1, 1)
+    vb.Visible = false
+    vb.Parent = sg
+    local par = nil
+    pcall(function() if gethui then par = gethui() end end)
+    if par == nil then par = LP:WaitForChild("PlayerGui") end
+    sg.Parent = par
+    veilBtn = vb
+    reg({ Disconnect = function()
+      pcall(function() sg:Destroy() end)
+    end })
+  end)
   -- late-step mouse pin (see loop): re-bind cleanly on re-inject, unbind on unload.
   -- Verified live: the game re-locks the pointer ~every frame from several
   -- pipelines at once, so one RenderStep is not enough — RenderStep(100000)
@@ -482,7 +514,7 @@ return function(api)
           savedMouse = userInput.MouseBehavior
           userInput.MouseBehavior = Enum.MouseBehavior.Default
         end
-        if not userInput.MouseIconEnabled then userInput.MouseIconEnabled = true end
+        userInput.MouseIconEnabled = true
       end)
     end
   end
@@ -522,6 +554,7 @@ return function(api)
       local menuOpen = hubOpen()
       if menuOpen ~= lastMenu then
         lastMenu = menuOpen
+        if veilBtn then pcall(function() veilBtn.Visible = menuOpen end) end
         if not menuOpen then
           pcall(function()
             if savedMouse then userInput.MouseBehavior = savedMouse; savedMouse = nil end
