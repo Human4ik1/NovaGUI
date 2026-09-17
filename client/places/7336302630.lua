@@ -915,10 +915,9 @@ return function(api)
         if head and head:IsA("BasePart") then
           headTarget = Vector3.new(dp.X + dir0.X * 1.0, head.Position.Y, dp.Z + dir0.Z * 1.0)
         end
-        -- exit point is only used to aim the walk; the walk ENDS by lingering
-        -- 1m past the middle, not by marching on: village rooms are tiny and
-        -- 2m past the slab is often already behind the BACK wall (outside
-        -- again = rejected packets). Linger inside, don't transit through.
+        -- walk ENDS parked in the slab middle (dot ~0), not past it: the
+        -- body sits inside the doorway, the leaned head a meter into the
+        -- room. Nothing marches on to the back wall.
         local t0, prevDot, insideT, knockAlt = os.clock(), nil, nil, 0
         local finished = false
         while os.clock() - t0 < 5 and not finished do
@@ -934,18 +933,17 @@ return function(api)
           end
           prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
-          if dot < 1.0 then
-            -- deliberately SLOW (8/s): every frame inside the valid spot
-            -- is worth more than rushing past it. Spam runs the WHOLE
-            -- pass, not just inside — rejected outside packets cost
-            -- nothing, and this way the valid window can't be straddled.
-            local step = 8 / 60
+          if dot < -0.2 then
+            -- crouch-pace to the slab MIDDLE and stop there: the body parks
+            -- inside the doorway (noclip holds it safe), the leaned head is
+            -- already a meter past into the room. No marching past the door.
+            local step = 5 / 60
             root.CFrame = CFrame.new(
               Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
           else
             if not insideT then insideT = os.clock() end
-            if os.clock() - insideT > 1.2 then finished = true end
-            root.CFrame = CFrame.new(rp, look) -- hold the spot, keep facing
+            if os.clock() - insideT > 1.5 then finished = true end
+            root.CFrame = CFrame.new(rp, look) -- hold the middle, keep facing
           end
           pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
           -- hold the lean: head parked past the slab, velocity killed so the
