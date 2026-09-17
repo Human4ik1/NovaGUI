@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.0-shooter"
+  local MODULE_VERSION = "1.1-mouse"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -76,7 +76,7 @@ return function(api)
     aimed_on = false, aimed_range = 500,
     aim_on = false, aim_part = "Head", aim_fov = 15, aim_smooth = 65,
     aim_range = 1200,
-    aim_hold = "right", aim_prio = "closest", aim_vis = true,
+    aim_hold = "custom", aim_prio = "closest", aim_vis = true,
     aim_circle = false, aim_pause = true, aim_delay = 0.1,
     skip_friends = true, skip_wl = true, skip_mates = true, bl_only = false,
     glow_on = false, glow_top = true,
@@ -86,7 +86,7 @@ return function(api)
     fullbright = false,
     radar_on = false, radar_range = 800, radar_size = 170, radar_corner = "BottomRight",
     cs_mouse = true,
-    aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.UserInputType.MouseButton2,
+    aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.KeyCode.LeftAlt,
   }
 
   local HAS_DRAWING = false
@@ -469,6 +469,32 @@ return function(api)
   local statLbl, dbgLbl
   local statTick, nP = 0, 0
   local lastMenu, savedMouse = nil, nil
+  -- late-step mouse pin (see loop): re-bind cleanly on re-inject, unbind on unload
+  pcall(function() runService:UnbindFromRenderStep("HumaMouseUnlock") end)
+  do
+    local ok, err = pcall(function()
+      runService:BindToRenderStep("HumaMouseUnlock", 4000, function()
+        if moduleDead then return end
+        if lastMenu == true and F.cs_mouse ~= false then
+          pcall(function()
+            if userInput.MouseBehavior ~= Enum.MouseBehavior.Default then
+              savedMouse = userInput.MouseBehavior
+              userInput.MouseBehavior = Enum.MouseBehavior.Default
+            end
+            if not userInput.MouseIconEnabled then userInput.MouseIconEnabled = true end
+          end)
+        end
+      end)
+    end)
+    if not ok then
+      -- fallback: executors without BindToRenderStep keep the old one-shot
+      -- attempt in the loop (better than nothing)
+      dbg.last = "mousebind: " .. tostring(err):sub(1, 60)
+    end
+  end
+  reg({ Disconnect = function()
+    pcall(function() runService:UnbindFromRenderStep("HumaMouseUnlock") end)
+  end })
 
   -- --------------------------------------------------------------------------
   -- Main loop (eyes + camera only — nothing here replicates)
@@ -484,24 +510,18 @@ return function(api)
         dbg.fps = math.floor(dbg.frames / math.max(now - dbg.fpsT, 0.01) + 0.5)
         dbg.frames, dbg.fpsT = 0, now
       end
-      -- mouse unlock: the game holds LockCenter; while our window is open
-      -- the pointer belongs to the menu, afterwards it goes back.
+      -- mouse unlock: the game re-locks the pointer (LockCenter) EVERY
+      -- frame, so a one-time set melts instantly. While our window is open
+      -- we pin Default late in the render step (after the camera), and give
+      -- the game its lock back the moment the window closes.
       local menuOpen = hubOpen()
       if menuOpen ~= lastMenu then
         lastMenu = menuOpen
-        pcall(function()
-          if menuOpen then
-            if F.cs_mouse ~= false then
-              local mb = userInput.MouseBehavior
-              if mb ~= Enum.MouseBehavior.Default then
-                savedMouse = mb
-                userInput.MouseBehavior = Enum.MouseBehavior.Default
-              end
-            end
-          else
+        if not menuOpen then
+          pcall(function()
             if savedMouse then userInput.MouseBehavior = savedMouse; savedMouse = nil end
-          end
-        end)
+          end)
+        end
       end
       local me = myChar()
       frameMe = me
@@ -1163,7 +1183,7 @@ return function(api)
   flagColor(gSec, "Teammate glow", "glow_friend")
 
   local aSec = pages.Aim:Section({ Name = "Aim-assist" })
-  aSec:Paragraph("Camera only — no packets, no autofire. Teammates are never targeted.")
+  aSec:Paragraph("Camera only — no packets, no autofire. Hold LeftAlt by default (RMB is firemode on most guns here — rebind Custom aim key if you like). Teammates are never targeted.")
   flagDropdown(aSec, "Mode", "aim_mode", { "Assist", "Camera lock" })
   flagSlider(aSec, "Assist turn speed", "aim_strength", 1, 180, { suf = "deg/s" })
   flagSlider(aSec, "Assist dead zone", "aim_deadzone", 0, 10, { dec = 1, suf = "deg" })
