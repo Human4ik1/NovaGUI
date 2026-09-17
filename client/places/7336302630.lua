@@ -858,7 +858,7 @@ return function(api)
         -- 1m past the middle, not by marching on: village rooms are tiny and
         -- 2m past the slab is often already behind the BACK wall (outside
         -- again = rejected packets). Linger inside, don't transit through.
-        local t0, prevDot, insideT = os.clock(), nil, nil
+        local t0, prevDot, insideT, knockAlt = os.clock(), nil, nil, 0
         local finished = false
         while os.clock() - t0 < 5 and not finished do
           if not root.Parent then break end
@@ -874,15 +874,16 @@ return function(api)
           prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
           if dot < 1.0 then
-            -- approach at legit walk speed: your manual noclip passes were
-            -- done at 16/s and worked — slower only gives the yank-back
-            -- more frames to win.
-            local step = 16 / 60
+            -- deliberately SLOW (8/s): every frame inside the valid spot
+            -- is worth more than rushing past it. Spam runs the WHOLE
+            -- pass, not just inside — rejected outside packets cost
+            -- nothing, and this way the valid window can't be straddled.
+            local step = 8 / 60
             root.CFrame = CFrame.new(
               Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
           else
             if not insideT then insideT = os.clock() end
-            if os.clock() - insideT > 0.8 then finished = true end
+            if os.clock() - insideT > 1.2 then finished = true end
             root.CFrame = CFrame.new(rp, look) -- hold the spot, keep facing
           end
           pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
@@ -895,15 +896,15 @@ return function(api)
               cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
             end
           end)
-          -- spam concentrates INSIDE, not outside: packets fired from the
-          -- street are auto-rejected by the server. Inside spam fires EVERY
-          -- frame (~60/s) — the valid window between yank-backs can be a
-          -- couple of frames, and 33/s used to straddle it.
+          -- knock the WHOLE pass, alternating action 0/1: we cloned the
+          -- OUTSIDE (rejected) packet and never saw what the client sends
+          -- on a real inside open — if that uses action 1, 0-only spam
+          -- could never work. Both are the same remote/shape as F.
           if F.door_knock ~= false then
-            if dot > -0.5 then
-              local p = root.Position
-              pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
-            end
+            knockAlt = (knockAlt == 0) and 1 or 0
+            local p = root.Position
+            local act = knockAlt
+            pcall(function() rem:FireServer(nearest.m, act, p.X, p.Y, p.Z) end)
           end
           task.wait()
         end
