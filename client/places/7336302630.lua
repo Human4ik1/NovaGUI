@@ -844,8 +844,6 @@ return function(api)
           if dir0.Magnitude < 0.05 then dir0 = Vector3.new(0, 0, 1) end
         end
         dir0 = dir0.Unit
-        -- (walk length is measured live against an exit point 3m past the
-        -- middle, so any Reach distance works and yanks just mean walking.)
         local ch = myChar()
         local parts = {}
         if ch then
@@ -856,20 +854,35 @@ return function(api)
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
-        -- exit point: 2m past the middle along the walk line. Measured
-        -- from the LIVE position every frame, so a server yank-back just
-        -- means more walking instead of an early stop mid-slab.
-        local exitPt = Vector3.new(dp.X + dir0.X * 2, root.Position.Y, dp.Z + dir0.Z * 2)
-        local t0, lastFire, prevDot = os.clock(), 0, nil
-        while os.clock() - t0 < 4 do
+        -- exit point is only used to aim the walk; the walk ENDS by lingering
+        -- 1m past the middle, not by marching on: village rooms are tiny and
+        -- 2m past the slab is often already behind the BACK wall (outside
+        -- again = rejected packets). Linger inside, don't transit through.
+        local t0, prevDot, insideT = os.clock(), nil, nil
+        local finished = false
+        while os.clock() - t0 < 5 and not finished do
           if not root.Parent then break end
           local rp = root.Position
-          local toExit = Vector3.new(exitPt.X - rp.X, 0, exitPt.Z - rp.Z)
-          if toExit.Magnitude < 0.7 then break end
+          local rel = Vector3.new(rp.X - dp.X, 0, rp.Z - dp.Z)
+          local dot = rel.X * dir0.X + rel.Z * dir0.Z
+          if F.door_knock ~= false and prevDot ~= nil and prevDot <= 0 and dot > 0 then
+            for _ = 1, 2 do
+              local p = root.Position
+              pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+            end
+          end
+          prevDot = dot
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
-          local step = 10 / 60
-          root.CFrame = CFrame.new(
-            Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
+          if dot < 1.0 then
+            -- approach fast, then STOP 1m past the middle and hold it
+            local step = 10 / 60
+            root.CFrame = CFrame.new(
+              Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
+          else
+            if not insideT then insideT = os.clock() end
+            if os.clock() - insideT > 0.8 then finished = true end
+            root.CFrame = CFrame.new(rp, look) -- hold the spot, keep facing
+          end
           pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
           if ch and ch.Parent then
             for p in pairs(parts) do if p.Parent then p.CanCollide = false end end
@@ -880,24 +893,12 @@ return function(api)
               cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
             end
           end)
-          local now = os.clock()
           -- spam concentrates INSIDE, not outside: packets fired from the
-          -- street are auto-rejected by the server, so outside we walk
-          -- quietly and open fire only once past the slab (~33/s). The
-          -- exact crossing frame gets a bonus double-knock.
+          -- street are auto-rejected by the server. Inside spam fires EVERY
+          -- frame (~60/s) — the valid window between yank-backs can be a
+          -- couple of frames, and 33/s used to straddle it.
           if F.door_knock ~= false then
-            local rel = Vector3.new(rp.X - dp.X, 0, rp.Z - dp.Z)
-            local dot = rel.X * dir0.X + rel.Z * dir0.Z
-            if prevDot ~= nil and prevDot <= 0 and dot > 0 then
-              for _ = 1, 2 do
-                local p = root.Position
-                pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
-              end
-              lastFire = now
-            end
-            prevDot = dot
-            if dot > -0.5 and now - lastFire >= 0.03 then
-              lastFire = now
+            if dot > -0.5 then
               local p = root.Position
               pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
             end
