@@ -396,11 +396,14 @@ return function(api)
       end
     end
   end
-  local wlSet, blSet, friendSet, frSet = {}, {}, {}, {}
+  local wlSet, blSet, friendSet, frSet, blCount = {}, {}, {}, {}, 0
   local function aimAllowed(pl)
     local id = tostring(pl.UserId)
     if blSet[id] then return true end
-    if F.bl_only then return false end
+    -- bl_only with an EMPTY blacklist must not nuke every target: it only
+    -- constrains when the list actually has entries (silent dead aim is
+    -- the single most confusing failure of this filter).
+    if F.bl_only and blCount > 0 then return false end
     if F.skip_mates ~= false and isMate(pl) then return false end
     if F.skip_friends ~= false and (friendSet[id] or frSet[id]) then return false end
     if F.skip_wl ~= false and wlSet[id] then return false end
@@ -1314,6 +1317,7 @@ return function(api)
     for _ in pairs(wlSet) do nWL = nWL + 1 end
     for _ in pairs(blSet) do nBL = nBL + 1 end
     for _ in pairs(frSet) do nFR = nFR + 1 end
+    blCount = nBL
     local extra = #all - ALL_ROWS
     if allHead then allHead.Set(("players %d%s"):format(
       #all, extra > 0 and (" · +" .. extra .. " hidden") or "")) end
