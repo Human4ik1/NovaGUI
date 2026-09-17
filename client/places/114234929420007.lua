@@ -634,7 +634,7 @@ return function(api)
   local statLbl, dbgLbl
   local statTick, nP = 0, 0
   local hbTick, skinTick = 0, 0
-  local lastMenu, savedMouse = nil, nil
+  local lastMenu, savedMouse, sawLock = nil, nil, false
   -- click veil: fullscreen invisible button UNDER our window (DisplayOrder
   -- 40 < Nova's 50). Free cursor alone is not enough: clicks landing on
   -- bare game view are NOT consumed, so the game fires its gun under the
@@ -678,6 +678,7 @@ return function(api)
       pcall(function()
         if userInput.MouseBehavior ~= Enum.MouseBehavior.Default then
           savedMouse = userInput.MouseBehavior
+          sawLock = true
           userInput.MouseBehavior = Enum.MouseBehavior.Default
         end
         userInput.MouseIconEnabled = true
@@ -741,7 +742,10 @@ return function(api)
         if veilBtn then pcall(function() veilBtn.Visible = menuOpen end) end
         if not menuOpen then
           pcall(function()
-            if savedMouse then userInput.MouseBehavior = savedMouse; savedMouse = nil end
+            if savedMouse then userInput.MouseBehavior = savedMouse; savedMouse = nil
+            elseif sawLock and userInput.MouseBehavior == Enum.MouseBehavior.Default then
+              userInput.MouseBehavior = Enum.MouseBehavior.LockCenter
+            end
           end)
         end
       end
