@@ -830,76 +830,61 @@ return function(api)
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
       local ok, err = pcall(function()
-        -- through-direction = the door slab's own NORMAL (thin axis), not
-        -- your approach line and not the part's LookVector: the approach
-        -- line lands you sideways when you come at an angle, and part
-        -- axes are often rotated along the wall. Thin axis of a door box
-        -- is always the way through it.
+        -- phase walk: teleport gets reverted by the server, so do it the
+        -- manual way, automated. Face-pin the door like an aim lock,
+        -- noclip ON, walk straight through the slab for ~1s while spamming
+        -- the same open packet as F. Yank-backs mid-walk don't matter: the
+        -- walk resumes from wherever you are and the spam never stops.
         local dp = door.root.Position
-        local dc = door.root.CFrame
-        local sz = door.root.Size
-        local nrm
-        if sz.X <= sz.Z then
-          nrm = Vector3.new(dc.RightVector.X, 0, dc.RightVector.Z)
-        else
-          nrm = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
+        local dir0 = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
+        if dir0.Magnitude < 0.05 then
+          local lv = root.CFrame.LookVector
+          dir0 = Vector3.new(lv.X, 0, lv.Z)
+          if dir0.Magnitude < 0.05 then dir0 = Vector3.new(0, 0, 1) end
         end
-        if nrm.Magnitude < 0.05 then
-          local toDoor = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
-          nrm = (toDoor.Magnitude > 0.05) and toDoor.Unit or Vector3.new(0, 0, 1)
-        else
-          nrm = nrm.Unit
-        end
-        local toPl = root.Position - dp
-        local side = ((toPl.X * nrm.X + toPl.Z * nrm.Z) > 0) and -1 or 1
-        -- right up against the far face: HALF THE THIN side + body margin.
-        -- (max() here used to measure the door's WIDTH and dropped you
-        -- meters past it.)
-        local thin = math.min(sz.X, sz.Z)
-        local depth = thin / 2 + 1.5
-        if depth < 1.8 then depth = 1.8 end
-        local target = Vector3.new(dp.X + nrm.X * side * depth, root.Position.Y, dp.Z + nrm.Z * side * depth)
-        -- pin the turn: while movement keys are held the Humanoid re-faces
-        -- the walk direction every frame and would instantly undo our CFrame,
-        -- so AutoRotate goes off for the burst (restored right after).
+        dir0 = dir0.Unit
         local ch = myChar()
+        local parts = {}
+        if ch then
+          for _, p in ipairs(ch:GetDescendants()) do
+            if p:IsA("BasePart") then parts[p] = p.CanCollide; p.CanCollide = false end
+          end
+        end
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
-        pcall(function()
-          root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-          root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        end)
-        -- step through, then RE-PIN the 180 every packet: the game
-        -- re-asserts facing within frames (walk direction, camera state),
-        -- so one CFrame set decays to a ~30-degree shrug. Four pins over
-        -- ~0.15s hold the turn until the knocks are out.
-        root.CFrame = CFrame.new(target, Vector3.new(dp.X, target.Y, dp.Z))
-        pcall(function()
-          local cam = workspace.CurrentCamera
-          if cam then
-            cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
+        local t0, lastFire = os.clock(), 0
+        while os.clock() - t0 < 1.1 do
+          if not root.Parent then break end
+          local rp = root.Position
+          local look = Vector3.new(dp.X, rp.Y, dp.Z)
+          local step = 6 / 60
+          root.CFrame = CFrame.new(
+            Vector3.new(rp.X + dir0.X * step, rp.Y, rp.Z + dir0.Z * step), look)
+          pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
+          if ch and ch.Parent then
+            for p in pairs(parts) do if p.Parent then p.CanCollide = false end end
           end
-        end)
-        -- knock from the inside: the first packet goes out in the SAME frame
-        -- as the step (before the server can pull you back), three more
-        -- follow in case the yank is instant.
-        for _ = 1, 4 do
           pcall(function()
-            root.CFrame = CFrame.new(root.Position, Vector3.new(dp.X, root.Position.Y, dp.Z))
             local cam = workspace.CurrentCamera
             if cam then
               cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
             end
           end)
-          local p = root.Position
-          pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
-          task.wait(0.04)
+          local now = os.clock()
+          if now - lastFire >= 0.06 then
+            lastFire = now
+            local p = root.Position
+            pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+          end
+          task.wait()
         end
-        task.wait(0.15)
+        for p, v in pairs(parts) do
+          pcall(function() if p.Parent then p.CanCollide = v end end)
+        end
         if hum then pcall(function() hum.AutoRotate = autoWas end) end
       end)
-      if ok then Notify("Doors", "Phase burst → " .. tostring(nearest.name), "ok")
+      if ok then Notify("Doors", "Phase walk → " .. tostring(nearest.name), "ok")
       else Notify("Doors", tostring(err), "warn") end
     end)
   end
@@ -1703,7 +1688,7 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): steps you through the nearest door to its far side, faces it and fires 3 open packets from the inside — where no key is needed. The server pulls you back right after, but the door stays open. Reach = how close you must stand for the press to trigger.")
+  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the nearest door, noclips you straight through it for ~1s and spams the same open packet as F the whole way. Server yank-backs don't matter — the walk resumes and the spam never stops until the second is over.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
