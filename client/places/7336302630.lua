@@ -786,11 +786,13 @@ return function(api)
     return false
   end
 
-  -- Door assist: Delta doors have no prompts — the game itself opens them via
-  --   Remotes.Door:FireServer(doorModel, 0, playerPos.X, playerPos.Y, playerPos.Z)
-  -- (captured live from the F key). Assist sends the exact same packets while
-  -- the key is held, ~8/s, so it is indistinguishable from mashing F — just
-  -- faster and hands-free for the noclip+spam trick. No hooks involved.
+  -- Door phase+open: Delta checks key/side on the SERVER, so spamming the
+  -- remote from outside a locked door is pointless (the server just says no).
+  -- What works — the manual trick, automated: on key PRESS (not hold, no
+  -- loops) step once THROUGH the door plane to the far side, face the door
+  -- like the F prompt wants, and fire 3 open packets from the inside
+  -- position. The server pulls you back a moment later, but the door is
+  -- already opening and stays open. No hooks, no key simulation.
   local doorRem
   local function getDoorRem()
     if doorRem and doorRem.Parent then return doorRem end
@@ -800,14 +802,15 @@ return function(api)
     if ok and rem then doorRem = rem; return rem end
     return nil
   end
-  local doorSpamT, doorNoteT = 0, 0
+  local doorPrevHeld, doorCooldown = false, 0
   local function interactDoor(root)
     local now = os.clock()
     local held = F.door_assist and bindingDown(F.door_key) and not userInput:GetFocusedTextBox() and not hubOpen()
-    if not held then return end
-    if now - doorSpamT < 0.06 then return end -- ~16 packets/s: the noclip
-    -- window before the teleport-back is only a few frames, so volume matters
-    doorSpamT = now
+    local press = held and not doorPrevHeld
+    doorPrevHeld = held
+    if not press then return end
+    if now - doorCooldown < 1 then return end
+    doorCooldown = now
     local nearest, best = nil, tonumber(F.door_reach) or 8
     for _, entry in ipairs(doorCache) do
       if entry.m and entry.m.Parent and entry.root and entry.root.Parent then
@@ -815,20 +818,37 @@ return function(api)
         if distance <= best then best, nearest = distance, entry end
       end
     end
-    if not nearest then
-      if now - doorNoteT > 3 then doorNoteT = now
-        Notify("Doors", "No door within " .. string.format("%.0f", best) .. "m — get closer", "info") end
-      return
-    end
+    if not nearest then Notify("Doors", "No door close enough — get nearer", "info"); return end
     local rem = getDoorRem()
-    if not rem then
-      if now - doorNoteT > 3 then doorNoteT = now Notify("Doors", "Door remote not found", "warn") end
-      return
-    end
-    local pos = root.Position
-    local ok, err = pcall(function() rem:FireServer(nearest.m, 0, pos.X, pos.Y, pos.Z) end)
-    if not ok and now - doorNoteT > 3 then doorNoteT = now
-      Notify("Doors", tostring(err), "warn") end
+    if not rem then Notify("Doors", "Door remote not found", "warn"); return end
+    task.spawn(function()
+      local ok, err = pcall(function()
+        local dc = entry.root.CFrame
+        local flat = Vector3.new(dc.LookVector.X, 0, dc.LookVector.Z)
+        if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, 1) end
+        flat = flat.Unit
+        local toPl = root.Position - entry.root.Position
+        local dot = toPl.X * flat.X + toPl.Z * flat.Z
+        local side = (dot > 0) and -1 or 1 -- far side from the player
+        local depth = 3.5
+        pcall(function()
+          local sz = entry.root.Size
+          depth = math.max(sz.X, sz.Z) / 2 + 2
+        end)
+        local dp = entry.root.Position
+        local target = Vector3.new(dp.X + flat.X * side * depth, root.Position.Y, dp.Z + flat.Z * side * depth)
+        -- step through, face the door, knock 3 times from the inside
+        root.CFrame = CFrame.new(target, Vector3.new(dp.X, target.Y, dp.Z))
+        task.wait(0.03)
+        for _ = 1, 3 do
+          local p = root.Position
+          pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
+          task.wait(0.05)
+        end
+      end)
+      if ok then Notify("Doors", "Phase burst → " .. tostring(nearest.name), "ok")
+      else Notify("Doors", tostring(err), "warn") end
+    end)
   end
 
   -- --------------------------------------------------------------------------
@@ -1630,7 +1650,7 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("Hold the key: spams the same open packet as F (~16/s) at the nearest door. Key/lock checks run on the server: a locked door opens only with its key or FROM INSIDE — noclip through, hold H, the spam lands before the teleport-back kicks in.")
+  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): steps you through the nearest door to its far side, faces it and fires 3 open packets from the inside — where no key is needed. The server pulls you back right after, but the door stays open. Reach = how close you must stand for the press to trigger.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
