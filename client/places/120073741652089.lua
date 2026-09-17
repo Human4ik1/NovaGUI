@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.0-hunt"
+  local MODULE_VERSION = "1.1-hunt"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -37,6 +37,8 @@ return function(api)
     esp_filter = "",
     esp_col = Color3.fromRGB(255, 200, 80),
     esp_deadcol = Color3.fromRGB(255, 100, 100),
+    esp_glow = false, esp_glowcol = Color3.fromRGB(255, 170, 60),
+    esp_deadglow = false, esp_deadglowcol = Color3.fromRGB(255, 100, 100),
     esp_range = 2500,
     esp_names = true, esp_dist = true,
     aim_on = false, aim_part = "Heart", aim_fov = 12, aim_smooth = 60,
@@ -252,6 +254,69 @@ return function(api)
     sync(deadCache, deadMap, (F.esp_dead and (F.esp_names or F.esp_dist)) == true, F.esp_range, 12)
   end
 
+  -- Body glow (Highlights, nearest-first, engine-capped: 20 shared slots)
+  local glowMap, glowSeenT = {}, {}
+  local glowIds, glowNext = setmetatable({}, { __mode = "k" }), 0
+  local function glowKey(o, tag)
+    if not glowIds[o] then glowNext = glowNext + 1; glowIds[o] = glowNext end
+    return tag .. "_" .. glowIds[o]
+  end
+  local GLOW_CAP = 20
+  local glowUsed = 0
+  local function setGlow(model, col, on, tag)
+    if not model or not model.Parent then return end
+    local key = glowKey(model, tostring(tag))
+    local prev = glowMap[key]
+    if not on then
+      if prev then pcall(function() prev:Destroy() end) end
+      glowMap[key] = nil
+      glowSeenT[key] = nil
+      return
+    end
+    if prev and prev.Parent then
+      glowSeenT[key] = os.clock()
+      glowUsed = glowUsed + 1
+      pcall(function()
+        if prev.FillColor ~= col then prev.FillColor = col end
+        prev.DepthMode = F.glow_top ~= false and Enum.HighlightDepthMode.AlwaysOnTop
+          or Enum.HighlightDepthMode.Occluded
+      end)
+      return
+    end
+    if glowUsed >= GLOW_CAP then return end
+    glowUsed = glowUsed + 1
+    local ok, hl = pcall(function()
+      local h = Instance.new("Highlight")
+      h.Name = "HuntFX"
+      h.Adornee = model
+      h.FillColor = col
+      h.FillTransparency = 0.35
+      h.OutlineColor = Color3.new(1, 1, 1)
+      h.OutlineTransparency = 0.4
+      h.DepthMode = F.glow_top ~= false and Enum.HighlightDepthMode.AlwaysOnTop
+        or Enum.HighlightDepthMode.Occluded
+      h.Parent = model
+      return h
+    end)
+    glowMap[key] = (ok and hl) or nil
+    if glowMap[key] then glowSeenT[key] = os.clock() end
+  end
+  local function gcGlow(seen, stamp)
+    local now = stamp or os.clock()
+    local live = 0
+    for _ in pairs(glowMap) do live = live + 1 end
+    local grace = (live < 30) and 2 or 0
+    for k, h in pairs(glowMap) do
+      if not seen[k] then
+        if now - (glowSeenT[k] or 0) > grace then
+          pcall(function() h:Destroy() end)
+          glowMap[k] = nil
+          glowSeenT[k] = nil
+        end
+      end
+    end
+  end
+
   -- --------------------------------------------------------------------------
   -- Aim state (camera only) + autofire (input layer)
   -- --------------------------------------------------------------------------
@@ -419,12 +484,15 @@ return function(api)
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
       nL, nD = 0, 0
+      local seenGlow = {}
+      glowUsed = 0
+      local aimWhy = ""
 
       -- ESP labels (root position read live — animals walk)
       if meHRP then
         guarded("esp", function()
           local mp = meHRP.Position
-          local function draw(cache, map, on, col, dead)
+          local function draw(cache, map, on, col, dead, glowOn, glowCol)
             for _, e in ipairs(cache) do
               local L = e.lbl
               if L then L.Visible = false end
@@ -441,12 +509,16 @@ return function(api)
                     L.Position = V2(sp.X, sp.Y)
                     L.Visible = true
                   end
+                  if glowOn then
+                    setGlow(e.m, glowCol, true, dead and "hd" or "hl")
+                    seenGlow[glowKey(e.m, dead and "hd" or "hl")] = true
+                  end
                 end
               end
             end
           end
-          draw(liveCache, liveMap, F.esp_live == true, F.esp_col, false)
-          draw(deadCache, deadMap, F.esp_dead == true, F.esp_deadcol, true)
+          draw(liveCache, liveMap, F.esp_live == true, F.esp_col, false, F.esp_glow == true, F.esp_glowcol)
+          draw(deadCache, deadMap, F.esp_dead == true, F.esp_deadcol, true, F.esp_deadglow == true, F.esp_deadglowcol)
         end)
       else
         for _, maps in ipairs({ liveMap, deadMap }) do
@@ -464,6 +536,8 @@ return function(api)
           local maxR = F.aim_range or 1500
           local best, bestM = nil, nil
           local bestScore = cap
+          -- widest candidate for the why-no-lock readout below
+          local wM, wDisp, wAng, wDist = nil, nil, math.huge, nil
           local origin = camera.CFrame.Position
           local look = camera.CFrame.LookVector
           for _, e in ipairs(liveCache) do
@@ -475,6 +549,9 @@ return function(api)
                 local len = dir.Magnitude
                 if len == len and len > 1 and len <= maxR then
                   local ang = math.acos(clamp(look:Dot(dir / len), -1, 1))
+                  if ang == ang and ang < wAng then
+                    wAng, wM, wDisp, wDist = ang, m, e.disp, len
+                  end
                   if ang == ang and ang < cap and isVisible(origin, ap, m) then
                     if ang < bestScore then
                       bestScore = ang; best = ap; bestM = m
@@ -482,6 +559,20 @@ return function(api)
                   end
                 end
               end
+            end
+          end
+          if not best and wDisp then
+            -- exactly one visibility raycast, only when idle: tells the
+            -- user whether to step closer/aim better/wait for a lane
+            local deg = math.deg(wAng)
+            if wAng > cap then
+              aimWhy = ("aim: %s %dm %d° off-aim"):format(wDisp, math.floor(wDist + 0.5), math.floor(deg + 0.5))
+            else
+              local wap = aimSpot(wM)
+              local clear = wap and isVisible(origin, wap, wM)
+              aimWhy = clear
+                and (("aim: %s %dm in cone, acquiring…"):format(wDisp, math.floor(wDist + 0.5)))
+                or (("aim: %s %dm WALLED"):format(wDisp, math.floor(wDist + 0.5)))
             end
           end
           if best then
@@ -551,10 +642,14 @@ return function(api)
         end
       end)
 
+      gcGlow(seenGlow)
+
       if statLbl and now - statTick > 2 then
         statTick = now
         pcall(function()
-          statLbl.Set(("live %d - dead %d%s"):format(nL, nD, aimOn and " - LOCK" or ""))
+          statLbl.Set(("live %d - dead %d%s%s"):format(nL, nD,
+            aimOn and " - LOCK" or "",
+            (not aimOn and F.aim_on and aimWhy ~= "") and (" - " .. aimWhy) or ""))
           local parts = { ("loop %dfps"):format(dbg.fps) }
           for _, sec in ipairs({ "scan", "labels", "esp", "magic", "harvest", "aim", "hud" }) do
             if dbg.err[sec] then
@@ -585,6 +680,9 @@ return function(api)
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     for _, page in pairs(pages) do page:Destroy() end
     freeTransient()
+    for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
+    for k in pairs(glowMap) do glowMap[k] = nil end
+    for k in pairs(glowSeenT) do glowSeenT[k] = nil end
     for part, o in pairs(hbOrig) do
       pcall(function()
         if part.Parent then part.Size = o.s; part.Transparency = o.t; part.Material = o.m end
@@ -656,6 +754,8 @@ return function(api)
   flagToggle(liveSec, "Distance", "esp_dist")
   flagSlider(liveSec, "Max distance", "esp_range", 200, 6000, { suf = "m" })
   flagColor(liveSec, "Color", "esp_col")
+  flagToggle(liveSec, "Body glow", "esp_glow", "Highlight live animals (nearest-first, engine-capped)")
+  flagColor(liveSec, "Glow color", "esp_glowcol")
   liveSec:TextBox({ Name = "Filter (comma list)", Placeholder = "Deer,Bear — empty = all",
     Default = F.esp_filter, Flag = "hu_esp_filter",
     Callback = function(v) F.esp_filter = tostring(v or "") end })
@@ -665,6 +765,8 @@ return function(api)
   flagToggle(deadSec, "Names", "esp_names")
   flagToggle(deadSec, "Distance", "esp_dist")
   flagColor(deadSec, "Color", "esp_deadcol")
+  flagToggle(deadSec, "Body glow", "esp_deadglow")
+  flagColor(deadSec, "Glow color", "esp_deadglowcol")
 
   local aimSec = pages.Combat:Section({ Name = "Aimbot" })
   aimSec:Paragraph("3 steps: 1) Aimbot ON 2) Autofire ON 3) close the menu and hunt. LOCK in About means tracking.")
@@ -777,6 +879,9 @@ return function(api)
   dbgLbl = aboutSec:Label("loop - fps")
   aboutSec:Button({ Name = "Rebuild overlays", Variant = "ghost", Callback = function()
     freeTransient()
+    for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
+    for k in pairs(glowMap) do glowMap[k] = nil end
+    for k in pairs(glowSeenT) do glowSeenT[k] = nil end
     for _, maps in ipairs({ liveMap, deadMap }) do
       for m, o in pairs(maps) do
         if o.lbl then pcall(function() o.lbl:Remove() end) end
