@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.5-aim"
+  local MODULE_VERSION = "1.6-pipes"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -555,6 +555,18 @@ return function(api)
   end
   reg(runService.Heartbeat:Connect(mouseForce))
   reg(runService.Stepped:Connect(mouseForce))
+  -- the winning probe covered these too: PreRender/PreSimulation/
+  -- PostSimulation all run between Heartbeat and Render — a writer sitting
+  -- in any of them beats Heartbeat+Stepped+Render coverage.
+  if runService.PreRender then
+    reg(runService.PreRender:Connect(mouseForce))
+  end
+  if runService.PreSimulation then
+    reg(runService.PreSimulation:Connect(mouseForce))
+  end
+  if runService.PostSimulation then
+    reg(runService.PostSimulation:Connect(mouseForce))
+  end
   -- the lock is re-applied on INPUT events (mouse move re-locks between
   -- frames — that's why it holds while dead and dies while playing), so
   -- counter-force on every input event too, not just every frame.
