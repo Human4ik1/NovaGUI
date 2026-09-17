@@ -18,7 +18,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "2.19-lists"
+  local MODULE_VERSION = "2.20-lists3"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -956,12 +956,12 @@ return function(api)
   -- chunk, so everything here must be definition-only (never executed at
   -- require time). List persistence (loadSets/saveSets) + row wiring live
   -- inside the UI chunk below and write into these shared tables.
-  local wlSet, blSet, friendSet = {}, {}, {}
+  local wlSet, blSet, friendSet, frSet, blCount = {}, {}, {}, {}, 0
   local function aimAllowed(pl)
     local id = tostring(pl.UserId)
     if blSet[id] then return true end
-    if F.bl_only then return false end
-    if F.skip_friends ~= false and friendSet[id] then return false end
+    if F.bl_only and blCount > 0 then return false end
+    if F.skip_friends ~= false and (friendSet[id] or frSet[id]) then return false end
     if F.skip_wl ~= false and wlSet[id] then return false end
     return true
   end
@@ -1928,22 +1928,24 @@ return function(api)
   flagToggle(lookSec, "Aimed-at alert", "aimed_on",
     "Quiet dot under the crosshair while someone is looking at you (cone + wall checked, no text)")
   flagSlider(lookSec, "Alert range", "aimed_range", 100, 2000, { suf = "m" })
-  -- Player list: Nova has no columns and no section wipe, so one compact
-  -- column of rows (name + state cycler) with search. Statuses: BL (red,
-  -- aim forced) > WL (blue, aim skipped) > FRIEND (green, aim skipped).
-  -- Sets persist in the profile as pd_wl_list / pd_bl_list.
-  local plistSec = espTabs.Players:Section({ Name = "Player list" })
-  plistSec:Paragraph("Aim filter. Button on each row cycles: — → WL → BL. Friends are detected automatically.")
+  -- Player lists: three separate lists — All players / Whitelist /
+  -- Blacklist, one section each (Nova has no columns). Row buttons move
+  -- people around: in All the button cycles — → WL → BL → FR → —, in WL/BL
+  -- it removes the mark. Friends auto-detect (green) and can also be added
+  -- by hand (FR). Aim: BL forced, WL/friends skipped (toggles above).
+  -- Persisted in the profile as pd_wl_list / pd_bl_list / pd_fr_list.
+  local plistSec = espTabs.Players:Section({ Name = "All players" })
+  plistSec:Paragraph("Button on each row cycles: — → WL → BL → FR → —")
   flagToggle(plistSec, "Skip friends", "skip_friends", "Never aim at friends")
   flagToggle(plistSec, "Skip whitelist", "skip_wl", "Never aim at whitelisted players")
   flagToggle(plistSec, "Blacklist only", "bl_only", "Aim ONLY at blacklisted players")
-  local LIST_ROWS = 16
-  local listRows, listSearch = {}, ""
+  local ALL_ROWS, SUB_ROWS = 14, 10
+  local allRows, wlRows, blRows, listSearch = {}, {}, {}, ""
   local COL_BL = Color3.fromRGB(246, 114, 128)
   local COL_WL = Color3.fromRGB(122, 150, 255)
   local COL_FR = Color3.fromRGB(96, 214, 150)
   local function loadSets()
-    wlSet, blSet = {}, {}
+    wlSet, blSet, frSet = {}, {}, {}
     local function read(name)
       local N = NovaUI
       local v = N and N.Flags and N.Flags[name]
@@ -1954,6 +1956,7 @@ return function(api)
     end
     for _, id in ipairs(read("pd_wl_list")) do wlSet[tostring(id)] = true end
     for _, id in ipairs(read("pd_bl_list")) do blSet[tostring(id)] = true end
+    for _, id in ipairs(read("pd_fr_list")) do frSet[tostring(id)] = true end
   end
   local function saveSets()
     local function arr(s)
@@ -1965,60 +1968,105 @@ return function(api)
     if NovaUI and NovaUI.Flags then
       NovaUI.Flags["pd_wl_list"] = arr(wlSet)
       NovaUI.Flags["pd_bl_list"] = arr(blSet)
+      NovaUI.Flags["pd_fr_list"] = arr(frSet)
     end
   end
-  local listHead
-  local function paintRow(i)
-    local row = listRows[i]
+  local function isFriend(id) return friendSet[id] or frSet[id] end
+  local function dispName(pl)
+    return pl.DisplayName ~= pl.Name
+      and (pl.DisplayName .. " (@" .. pl.Name .. ")") or pl.Name
+  end
+  local allHead, wlHead, blHead
+  local function paintAll(i)
+    local row = allRows[i]
     if not row or not row.plr then return end
     local id = tostring(row.plr.UserId)
     local tag, col, btn
     if blSet[id] then tag, col, btn = "BL", COL_BL, "BL"
     elseif wlSet[id] then tag, col, btn = "WL", COL_WL, "WL"
-    elseif friendSet[id] then tag, col, btn = "FRIEND", COL_FR, "—"
+    elseif isFriend(id) then tag, col, btn = "FR", COL_FR, "FR"
     else tag, col, btn = "", nil, "—" end
-    local nm = row.plr.DisplayName ~= row.plr.Name
-      and (row.plr.DisplayName .. " (@" .. row.plr.Name .. ")") or row.plr.Name
+    local nm = dispName(row.plr)
     row.lbl.Set(tag ~= "" and (nm .. "  [" .. tag .. "]") or nm)
     if col then pcall(function() row.lbl.Instance.TextColor3 = col end) end
     row.btn.SetText(btn)
     pcall(function() row.lbl.Instance.Visible = true end)
     pcall(function() row.btn.Instance.Visible = true end)
   end
+  local function paintSub(rows, i, kind, col, tag)
+    local row = rows[i]
+    if not row or not row.info then return end
+    row.lbl.Set(row.info.name .. "  [" .. tag .. "]")
+    pcall(function() row.lbl.Instance.TextColor3 = col end)
+    row.btn.SetText("×")
+    pcall(function() row.lbl.Instance.Visible = true end)
+    pcall(function() row.btn.Instance.Visible = true end)
+  end
+  local function hideRow(row)
+    pcall(function() row.lbl.Instance.Visible = false end)
+    pcall(function() row.btn.Instance.Visible = false end)
+  end
   local function refreshList()
     if players == nil or LP == nil then return end
     loadSets()
-    local all = {}
+    local present = {}
     for _, pl in ipairs(players:GetPlayers()) do
-      if pl ~= LP then
-        if listSearch == "" or (pl.Name:lower() .. " " .. pl.DisplayName:lower()):find(listSearch, 1, true) then
-          all[#all + 1] = pl
-        end
+      if pl ~= LP then present[#present + 1] = pl end
+    end
+    table.sort(present, function(a, b) return a.Name:lower() < b.Name:lower() end)
+    -- All: search-filtered present players
+    local all = {}
+    for _, pl in ipairs(present) do
+      if listSearch == "" or (pl.Name:lower() .. " " .. pl.DisplayName:lower()):find(listSearch, 1, true) then
+        all[#all + 1] = pl
       end
     end
-    table.sort(all, function(a, b) return a.Name:lower() < b.Name:lower() end)
-    local nWL, nBL = 0, 0
+    for i, row in ipairs(allRows) do
+      row.plr = all[i]
+      if row.plr then paintAll(i) else hideRow(row) end
+    end
+    -- WL / BL: present members only
+    local wl, bl = {}, {}
+    for _, pl in ipairs(present) do
+      local id = tostring(pl.UserId)
+      if wlSet[id] then wl[#wl + 1] = { id = id, name = dispName(pl) } end
+      if blSet[id] then bl[#bl + 1] = { id = id, name = dispName(pl) } end
+    end
+    for i, row in ipairs(wlRows) do
+      row.info = wl[i]
+      if row.info then paintSub(wlRows, i, "WL", COL_WL, "WL") else hideRow(row) end
+    end
+    for i, row in ipairs(blRows) do
+      row.info = bl[i]
+      if row.info then paintSub(blRows, i, "BL", COL_BL, "BL") else hideRow(row) end
+    end
+    local nWL, nBL, nFR = 0, 0, 0
     for _ in pairs(wlSet) do nWL = nWL + 1 end
     for _ in pairs(blSet) do nBL = nBL + 1 end
-    for i, row in ipairs(listRows) do
-      row.plr = all[i]
-      if row.plr then paintRow(i)
-      else
-        pcall(function() row.lbl.Instance.Visible = false end)
-        pcall(function() row.btn.Instance.Visible = false end)
-      end
-    end
-    local extra = #all - LIST_ROWS
-    if listHead then listHead.Set(("players %d · WL %d · BL %d%s"):format(
-      #all, nWL, nBL, extra > 0 and (" · +" .. extra .. " hidden") or "")) end
+    for _ in pairs(frSet) do nFR = nFR + 1 end
+    blCount = nBL
+    local extra = #all - ALL_ROWS
+    if allHead then allHead.Set(("players %d%s"):format(
+      #all, extra > 0 and (" · +" .. extra .. " hidden") or "")) end
+    if wlHead then wlHead.Set(("whitelist %d"):format(nWL)) end
+    if blHead then blHead.Set(("blacklist %d · manual friends %d"):format(nBL, nFR)) end
   end
-  local function cycleRow(i)
-    local row = listRows[i]
+  local function cycleAll(i)
+    local row = allRows[i]
     if not row or not row.plr then return end
     local id = tostring(row.plr.UserId)
-    if not wlSet[id] and not blSet[id] then wlSet[id] = true
+    if frSet[id] then frSet[id] = nil
+    elseif blSet[id] then blSet[id] = nil; frSet[id] = true
     elseif wlSet[id] then wlSet[id] = nil; blSet[id] = true
-    else blSet[id] = nil end
+    else wlSet[id] = true end
+    saveSets()
+    refreshList()
+  end
+  local function unlist(rows, i)
+    local row = rows[i]
+    if not row or not row.info then return end
+    local id = row.info.id
+    wlSet[id] = nil; blSet[id] = nil
     saveSets()
     refreshList()
   end
@@ -2053,17 +2101,37 @@ return function(api)
   end
   plistSec:TextBox({ Name = "Search", Placeholder = "type a name…", Live = true, Flag = "pd_plist_search",
     Callback = function(v) listSearch = tostring(v or ""):lower(); refreshList() end })
-  listHead = plistSec:Label("…")
-  for i = 1, LIST_ROWS do
+  allHead = plistSec:Label("…")
+  for i = 1, ALL_ROWS do
     local lbl = plistSec:Label("")
-    local btn = plistSec:Button({ Name = "—", Callback = function() cycleRow(i) end })
-    listRows[i] = { lbl = lbl, btn = btn, plr = nil }
+    local btn = plistSec:Button({ Name = "—", Callback = function() cycleAll(i) end })
+    allRows[i] = { lbl = lbl, btn = btn, plr = nil }
     pcall(function() lbl.Instance.Visible = false end)
     pcall(function() btn.Instance.Visible = false end)
   end
-  plistSec:Button({ Name = "Refresh list", Variant = "ghost", Callback = function()
+  plistSec:Button({ Name = "Refresh lists", Variant = "ghost", Callback = function()
     refreshList(); scanFriends()
   end })
+  local wlSec = espTabs.Players:Section({ Name = "Whitelist" })
+  wlSec:Paragraph("Aim never touches these. × removes the mark.")
+  wlHead = wlSec:Label("…")
+  for i = 1, SUB_ROWS do
+    local lbl = wlSec:Label("")
+    local btn = wlSec:Button({ Name = "×", Callback = function() unlist(wlRows, i) end })
+    wlRows[i] = { lbl = lbl, btn = btn, info = nil }
+    pcall(function() lbl.Instance.Visible = false end)
+    pcall(function() btn.Instance.Visible = false end)
+  end
+  local blSec = espTabs.Players:Section({ Name = "Blacklist" })
+  blSec:Paragraph("Aim is forced on these. × removes the mark.")
+  blHead = blSec:Label("…")
+  for i = 1, SUB_ROWS do
+    local lbl = blSec:Label("")
+    local btn = blSec:Button({ Name = "×", Callback = function() unlist(blRows, i) end })
+    blRows[i] = { lbl = lbl, btn = btn, info = nil }
+    pcall(function() lbl.Instance.Visible = false end)
+    pcall(function() btn.Instance.Visible = false end)
+  end
   if players ~= nil then
     reg(players.PlayerAdded:Connect(function() refreshList() end))
     reg(players.PlayerRemoving:Connect(function() refreshList() end))
