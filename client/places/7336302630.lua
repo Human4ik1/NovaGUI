@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.15-adorn"
+  local MODULE_VERSION = "2.16-lootglow"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -93,8 +93,11 @@ return function(api)
     loot_hlcol = Color3.fromRGB(255, 210, 90),
     loot_range = 1500,
     loot_contname = false,
-    bot_esp = false, bot_col = Color3.fromRGB(255, 140, 50),
-    bot_glow = false, bot_range = 2500,
+    -- per-category visual mode: "Off" | "ESP" (unlimited wireframe boxes) |
+    -- "GLOW" (filled chams, engine-capped). Pick per category in ESP>LootGlow.
+    lg_cont_mode = "ESP", lg_drop_mode = "ESP",
+    lg_quest_mode = "GLOW", lg_mine_mode = "GLOW",
+    bot_esp = false, bot_col = Color3.fromRGB(255, 140, 50),    bot_glow = false, bot_range = 2500,
     aim_bots = false,
     fullbright = false,
     corpse_on = false, corpse_ai = false,
@@ -449,7 +452,7 @@ return function(api)
     if (F.door_glow or F.door_assist) and os.clock() - doorTick > 5 then
       doorTick = os.clock(); scanDoors()
     end
-    if (F.mine_glow or F.mine_names or F.mine_dist) and os.clock() - mineTick > 5 then
+    if (F.lg_mine_mode ~= "Off" or F.mine_names or F.mine_dist) and os.clock() - mineTick > 5 then
       mineTick = os.clock(); scanMines()
     end
     local budget = SCAN_BUDGET
@@ -677,16 +680,16 @@ return function(api)
       end
     end
     sync(lootCache, lootMap, "m", function(e)
-      if e.kind == "drop" then return F.loot_drop and (F.loot_dropname or F.loot_dropdist) end
-      if e.kind == "quest" then return F.loot_quest and (F.loot_questname or F.loot_questdist) end
-      return F.loot_cont and (F.loot_contname or F.loot_contdist)
+      if e.kind == "drop" then return F.lg_drop_mode ~= "Off" and (F.loot_dropname or F.loot_dropdist) end
+      if e.kind == "quest" then return F.lg_quest_mode ~= "Off" and (F.loot_questname or F.loot_questdist) end
+      return F.lg_cont_mode ~= "Off" and (F.loot_contname or F.loot_contdist)
     end, F.loot_range, 12)
     sync(corpseCache, corpseMap, "m", F.corpse_on or F.corpse_ai, F.corpse_range, 13)
     sync(npcCache, npcMap, "model", F.npc_on, F.npc_range, 12)
     sync(exitCache, exitMap, "part", F.exit_on, F.exit_range, 14)
     sync(botCache, botMap, "model", F.bot_esp, F.bot_range, 13)
     sync(doorCache, doorMap, "m", (F.door_names or F.door_dist), F.door_range, 13)
-    sync(mineCache, mineMap, "m", (F.mine_names or F.mine_dist), F.mine_range, 13)
+    sync(mineCache, mineMap, "m", F.lg_mine_mode ~= "Off" and (F.mine_names or F.mine_dist), F.mine_range, 13)
   end
 
   -- --------------------------------------------------------------------------
@@ -1059,7 +1062,8 @@ return function(api)
       -- mines FIRST in the entity pool (before players/bots/corpses):
       -- step-on-it hazards beat decoration. Nearest-first capped, so the
       -- closest mines always win slots no matter how crowded the server is.
-      if (F.mine_glow or F.mine_names or F.mine_dist) and meHRP then
+      local mineMode = F.lg_mine_mode or "Off"
+      if mineMode ~= "Off" and meHRP then
         guarded("mines", function()
           local cap = clamp(math.floor(F.mine_cap or 8), 1, 10)
           local shown = 0
@@ -1069,10 +1073,16 @@ return function(api)
             if entry.m and entry.m.Parent and entry.pos then
               local d = (meHRP.Position - entry.pos).Magnitude
               if d == d and d <= (F.mine_range or 400) then
-                if F.mine_glow and shown < cap then
-                  setGlow(entry.m, F.mine_col, true, "mine")
-                  seenGlow[glowKey(entry.m, "mine")] = true
-                  shown = shown + 1
+                if F.glow_loot and shown < cap then
+                  if mineMode == "ESP" then
+                    local akey = setAdorn(entry.m, F.mine_col, true)
+                    if akey then seenAdorn[akey] = true end
+                    shown = shown + 1
+                  elseif mineMode == "GLOW" then
+                    setGlow(entry.m, F.mine_col, true, "mine")
+                    seenGlow[glowKey(entry.m, "mine")] = true
+                    shown = shown + 1
+                  end
                 end
                 local point, front = wts(entry.pos)
                 if label and front and onScreenPt(point, vs) and (F.mine_names or F.mine_dist) then
@@ -1366,19 +1376,19 @@ return function(api)
         end)
       end
 
-      -- loot (persistent labels)
-      if meHRP and (F.loot_cont or F.loot_drop or F.loot_quest) then
+      -- loot (persistent labels) — categories gated by their LootGlow mode
+      local function lootMode(it)
+        if it.kind == "drop" then return F.lg_drop_mode or "Off" end
+        if it.kind == "quest" then return F.lg_quest_mode or "Off" end
+        return F.lg_cont_mode or "Off" -- cont + spawn
+      end
+      if meHRP and (F.lg_cont_mode ~= "Off" or F.lg_drop_mode ~= "Off" or F.lg_quest_mode ~= "Off") then
         guarded("loot", function()
           for _, it in ipairs(lootCache) do
             local L = it.lbl
             if L then L.Visible = false end
-            -- explicit dispatch: the old `or F.loot_cont` fallback meant
-            -- unchecking Dropped/Quest did nothing while Containers was on
-            local want
-            if it.kind == "drop" then want = F.loot_drop == true
-            elseif it.kind == "quest" then want = F.loot_quest == true
-            else want = F.loot_cont == true end -- cont + spawn
-            if want and it.pos then
+            local mode = lootMode(it)
+            if mode ~= "Off" and it.pos then
               local d = (meHRP.Position - it.pos).Magnitude
               if d == d and d <= F.loot_range then
                 nL = nL + 1
@@ -1395,19 +1405,16 @@ return function(api)
                   L.Position = V2(sp.X, sp.Y)
                   L.Visible = true
                 end
-                -- lootCache is sorted nearest-first (see scanWorld), so
-                -- stopping once the loot pool is full still glows the
-                -- closest crates, not an arbitrary subset
+                -- ESP = unlimited wireframe adornments (no engine cap);
+                -- GLOW = filled chams from the shared loot pool (capped).
                 if F.glow_loot and it.m and it.m.Parent then
                   local gc = it.star and F.glow_star
                     or (it.kind == "drop" and F.glow_drop
                       or (it.kind == "quest" and F.glow_quest or F.glow_cont))
-                  if F.loot_glowmode == "Boxes" then
-                    -- unlimited path: wireframe adornments ignore the ~31
-                    -- Highlight ceiling — every crate in range gets a box
+                  if mode == "ESP" then
                     local akey = setAdorn(it.m, gc, true)
                     if akey then seenAdorn[akey] = true end
-                  else
+                  elseif mode == "GLOW" then
                     local lootCap = clamp(math.floor(F.glow_lootcap or GLOW_LOOT_CAP), 1, GLOW_LOOT_CAP)
                     if glowUsedLoot < lootCap then
                       -- seen key MUST match setGlow's internal glowKey(model,"l"):
@@ -1749,6 +1756,12 @@ return function(api)
     return sec:Color({ Name = name, Default = F[key], Flag = "pd_" .. key,
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
+  local MODES = { "Off", "ESP", "GLOW" }
+  local function flagMode(sec, name, key, tip)
+    return sec:Segmented({ Name = name, Options = MODES, Default = F[key],
+      Flag = "pd_" .. key, Tooltip = tip or "ESP = unlimited wireframe boxes. GLOW = filled chams, engine-capped.",
+      Callback = function(v) F[key] = tostring(v) end })
+  end
 
   local nav = api.Navigation or Tab:Navigation({ Name = "Project Delta" })
   local menuDefs = {
@@ -1763,7 +1776,7 @@ return function(api)
       Icon = def[2], Tooltip = def[3], Order = index })
   end
   pages.ESP:Select()
-  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" }, { Name = "Bots" } })
+  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" }, { Name = "Bots" }, { Name = "LootGlow" } })
   local aimTabs = pages.Aim:SubTabs({ { Name = "Aim-assist" }, { Name = "Silent Aim" } })
   local lootTabs = pages.Loot:SubTabs({ { Name = "Containers" }, { Name = "Items" }, { Name = "Doors" }, { Name = "Filters" } })
 
@@ -1813,33 +1826,115 @@ return function(api)
   flagSlider(gSec, "Outline thickness", "glow_visthick", 1, 6)
   flagColor(gSec, "Outline color", "glow_viscol")
   flagColor(gSec, "Player glow", "glow_enemy")
-  local lSec = lootTabs.Containers:Section({ Name = "Containers" })
-  flagToggle(lSec, "Containers", "loot_cont")
-  flagToggle(lSec, "Names", "loot_contname")
-  flagToggle(lSec, "Distance", "loot_contdist")
-  flagColor(lSec, "Glow color", "glow_cont")
-  local dropSec = lootTabs.Items:Section({ Name = "Dropped items" })
-  flagToggle(dropSec, "Dropped items", "loot_drop")
-  flagToggle(dropSec, "Names", "loot_dropname")
-  flagToggle(dropSec, "Distance", "loot_dropdist")
-  flagColor(dropSec, "Glow color", "glow_drop")
-  local questSec = lootTabs.Items:Section({ Name = "Quest items" })
-  flagToggle(questSec, "Quest items", "loot_quest")
-  flagToggle(questSec, "Names", "loot_questname")
-  flagToggle(questSec, "Distance", "loot_questdist")
-  flagColor(questSec, "Glow color", "glow_quest")
-  local commonLoot = lootTabs.Filters:Section({ Name = "Shared loot settings" })
-  flagToggle(commonLoot, "Loot glow", "glow_loot", "Applies to enabled loot categories")
-  flagSlider(commonLoot, "Highlight budget", "glow_lootcap", 1, 10)
-  commonLoot:Segmented({ Name = "Glow mode", Options = { "Boxes", "Highlight" },
-    Default = F.loot_glowmode, Flag = "pd_loot_glowmode",
-    Tooltip = "Boxes = wireframe, NO engine cap, every crate in range. Highlight = filled chams, capped ~10 by the engine.",
-    Callback = function(v) F.loot_glowmode = tostring(v) end })
-  flagSlider(commonLoot, "Max distance", "loot_range", 200, 4000, { suf = "m" })
+
+  -- LootGlow: every loot/mine visual in one place. Per category pick HOW
+  -- it shows: Off | ESP (wireframe boxes, unlimited) | GLOW (filled chams,
+  -- engine-capped ~10). e.g. mines on GLOW, crates on ESP — or the reverse.
+  local lgGeneral = espTabs.LootGlow:Section({ Name = "General" })
+  flagToggle(lgGeneral, "Loot visuals master", "glow_loot", "Kills every loot/mine visual at once")
+  flagSlider(lgGeneral, "Loot max distance", "loot_range", 200, 4000, { suf = "m" })
+  flagSlider(lgGeneral, "GLOW budget", "glow_lootcap", 1, 10,
+    { tip = "How many closest GLOW-mode items get Highlights (ESP mode ignores this)" })
+  flagColor(lgGeneral, "Label color", "loot_col")
+  flagColor(lgGeneral, "Star label", "loot_hlcol")
+  local lgCont = espTabs.LootGlow:Section({ Name = "Containers" })
+  flagMode(lgCont, "Show as", "lg_cont_mode")
+  flagToggle(lgCont, "Names", "loot_contname")
+  flagToggle(lgCont, "Distance", "loot_contdist")
+  flagColor(lgCont, "Color", "glow_cont")
+  local lgDrop = espTabs.LootGlow:Section({ Name = "Dropped items" })
+  flagMode(lgDrop, "Show as", "lg_drop_mode")
+  flagToggle(lgDrop, "Names", "loot_dropname")
+  flagToggle(lgDrop, "Distance", "loot_dropdist")
+  flagColor(lgDrop, "Color", "glow_drop")
+  local lgQuest = espTabs.LootGlow:Section({ Name = "Quest items" })
+  flagMode(lgQuest, "Show as", "lg_quest_mode")
+  flagToggle(lgQuest, "Names", "loot_questname")
+  flagToggle(lgQuest, "Distance", "loot_questdist")
+  flagColor(lgQuest, "Color", "glow_quest")
+  local lgMine = espTabs.LootGlow:Section({ Name = "Mines" })
+  lgMine:Paragraph("Landmines + claymores. GLOW mode is capped to the closest ones.")
+  flagMode(lgMine, "Show as", "lg_mine_mode")
+  flagToggle(lgMine, "Names", "mine_names")
+  flagToggle(lgMine, "Distance", "mine_dist")
+  flagSlider(lgMine, "Max distance", "mine_range", 50, 1500, { suf = "m" })
+  flagSlider(lgMine, "GLOW budget", "mine_cap", 1, 10)
+  flagColor(lgMine, "Color", "mine_col")
+  -- scanner: what is actually around you right now, by category — set the
+  -- modes above from live data instead of guessing
+  local lgScan = espTabs.LootGlow:Section({ Name = "Scanner" })
+  local scanLbl = lgScan:Label("press Scan to see what's around")
+  local bringList, bringPick = {}, nil
+  local bringDrop
+  lgScan:Button({ Name = "Scan nearby items", Variant = "ghost",
+    Tooltip = "Re-scans the world now and lists loot/mines in range",
+    Callback = function()
+      task.spawn(function()
+        guarded("scan", scanWorld)
+        local me = myHRP()
+        local mp = me and me.Position or nil
+        local cC, cD, cQ, cM = 0, 0, 0, 0
+        bringList = {}
+        if mp then
+          for _, it in ipairs(lootCache) do
+            if it.pos and (it.pos - mp).Magnitude <= (F.loot_range or 1500) then
+              if it.kind == "drop" then cD = cD + 1
+              elseif it.kind == "quest" then cQ = cQ + 1
+              else cC = cC + 1 end
+              if #bringList < 24 then
+                bringList[#bringList + 1] = { it = it,
+                  disp = it.name .. " · " .. math.floor(((it.pos - mp).Magnitude) + 0.5) .. "m" }
+              end
+            end
+          end
+          for _, e in ipairs(mineCache) do
+            if e.pos and (e.pos - mp).Magnitude <= (F.mine_range or 400) then cM = cM + 1 end
+          end
+        end
+        scanLbl.Set(("containers %d - drops %d - quest %d - mines %d"):format(cC, cD, cQ, cM))
+        local opts = {}
+        for _, b in ipairs(bringList) do opts[#opts + 1] = b.disp end
+        if #opts == 0 then opts = { "—" } end
+        bringDrop.SetOptions(opts)
+        bringPick = opts[1]
+        if #bringList > 0 then bringDrop.Set(opts[1], true) end
+      end)
+    end })
+  -- bring: pull an unanchored item to your feet. Anchored crates are
+  -- server-owned and won't move — the button tells you so honestly.
+  local lgBring = espTabs.LootGlow:Section({ Name = "Bring to me" })
+  lgBring:Paragraph("Works on physical (unanchored) drops near you — your client owns their physics. Anchored crates belong to the server and stay put.")
+  bringDrop = lgBring:Dropdown({ Name = "Item", Options = { "—" }, Default = "—",
+    Tooltip = "Fill with Scan nearby items first",
+    Callback = function(v) bringPick = tostring(v) end })
+  lgBring:Button({ Name = "Bring to me", Variant = "ghost", Callback = function()
+    local me = myHRP()
+    if not me then Notify("Bring", "No character", "warn"); return end
+    local target
+    for _, b in ipairs(bringList) do if b.disp == bringPick then target = b.it break end end
+    if not target or not target.m or not target.m.Parent then
+      Notify("Bring", "Item gone — scan again", "warn"); return end
+    local m = target.m
+    local part = m:IsA("BasePart") and m
+      or m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+    if not part then Notify("Bring", "No physical part", "warn"); return end
+    if part.Anchored then
+      Notify("Bring", target.name .. " is anchored (server-owned) — can't pull", "warn"); return end
+    local dest = me.Position + me.CFrame.LookVector * 3
+    dest = Vector3.new(dest.X, me.Position.Y + 1, dest.Z)
+    local ok = pcall(function()
+      if m:IsA("Model") then m:PivotTo(CFrame.new(dest))
+      else part.CFrame = CFrame.new(dest) end
+    end)
+    Notify("Bring", ok and ("Pulled " .. target.name) or "Pull failed", ok and "ok" or "error")
+  end })
+  -- NOTE: loot/mine visuals live in ESP > LootGlow now. This tab keeps
+  -- doors + keyword detection only.
+  local commonLoot = lootTabs.Filters:Section({ Name = "Keywords" })
+  commonLoot:Paragraph("Star marks valuable loot by name in both ESP and GLOW modes.")
   flagToggle(commonLoot, "Keyword star", "loot_hl")
   commonLoot:TextBox({ Name = "Keywords", Default = F.loot_keys, Flag = "pd_loot_keys",
     Callback = function(v) F.loot_keys = tostring(v or "") end })
-  flagColor(commonLoot, "Label color", "loot_col")
   flagColor(commonLoot, "Star label", "loot_hlcol")
   flagColor(commonLoot, "Star glow", "glow_star")
 
@@ -1880,14 +1975,6 @@ return function(api)
   flagSlider(exitSec, "Hide when closer than", "exit_near", 0, 500,
     { suf = "m", tip = "The game shows its own exit icon up close — hide ours inside this range so only one label is visible" })
   flagColor(exitSec, "Color", "exit_col")
-  local mineSec = pages.World:Section({ Name = "Mines" })
-  mineSec:Paragraph("Landmines + claymores from the AiZones folders. Glow is capped to the closest ones.")
-  flagToggle(mineSec, "Mine glow", "mine_glow")
-  flagToggle(mineSec, "Names", "mine_names")
-  flagToggle(mineSec, "Distance", "mine_dist")
-  flagSlider(mineSec, "Max distance", "mine_range", 50, 1500, { suf = "m" })
-  flagSlider(mineSec, "Glow budget", "mine_cap", 1, 10, { tip = "How many closest mines get Highlights" })
-  flagColor(mineSec, "Color", "mine_col")
   local radarSec = pages.World:Section({ Name = "Radar" })
   flagToggle(radarSec, "Radar", "radar_on")
   flagDropdown(radarSec, "Position", "radar_corner", { "TopLeft", "TopRight", "BottomLeft", "BottomRight" })
