@@ -33,7 +33,7 @@
 
   Design notes (v0.3.0):
     - flat minimal surfaces, one accent, hairline borders, generous padding
-    - Inter type ramp (with Gotham fallback), monospaced numerals for values
+    - Roblox font presets, monospaced numerals for values
     - popups (dropdown/color) live in a window overlay, so they never get
       clipped by a collapsed section or a scrolling page
 ]]
@@ -134,31 +134,16 @@ Nova.Theme = {}
 for k, v in pairs(Nova.Themes.Dark) do Nova.Theme[k] = v end
 
 --// Type ramp --------------------------------------------------------------
--- Inter where the client ships it, Gotham otherwise; numerals are monospaced
--- so sliders and counters do not twitch as digits change width.
-local Fonts, FontFallback = {}, {
+-- Use Roblox font presets instead of assuming a font-family file is installed.
+-- FontFace assignment can succeed before an asset fails asynchronously, so
+-- pcall around Font.new/FontFace cannot provide the promised fallback.
+local Fonts = {
   Regular = Enum.Font.Gotham, Medium = Enum.Font.GothamMedium,
   SemiBold = Enum.Font.GothamBold, Bold = Enum.Font.GothamBold,
   Mono = Enum.Font.Code,
 }
-do
-  local families = {
-    Regular = { "Inter", "Regular" }, Medium = { "Inter", "Medium" },
-    SemiBold = { "Inter", "SemiBold" }, Bold = { "Inter", "Bold" },
-    Mono = { "RobotoMono", "Medium" },
-  }
-  for name, def in pairs(families) do
-    local ok, f = pcall(function()
-      return Font.new("rbxasset://fonts/families/" .. def[1] .. ".json", Enum.FontWeight[def[2]])
-    end)
-    if ok then Fonts[name] = f end
-  end
-end
 local function setFont(o, weight)
-  weight = weight or "Medium"
-  local f = Fonts[weight]
-  if f and pcall(function() o.FontFace = f end) then return o end
-  pcall(function() o.Font = FontFallback[weight] or Enum.Font.GothamMedium end)
+  pcall(function() o.Font = Fonts[weight or "Medium"] or Fonts.Medium end)
   return o
 end
 
@@ -1041,7 +1026,7 @@ local function addKeybind(parent, opt, ctx)
   local box = New("TextButton", {
     Text = "", AutoButtonColor = false, BorderSizePixel = 0,
     BackgroundColor3 = T.Surface, AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(96, 28),
+    Position = UDim2.new(1, -44, 0.5, 0), Size = UDim2.fromOffset(84, 28),
   }, row)
   Paint(box, "bg", "Surface"); Corner(box, 8); Stroke(box, "Line", 1, 0.35)
   local kt = Txt(box, "NONE", { size = 11, w = "Mono", token = "Sub", xa = Enum.TextXAlignment.Center })
@@ -1066,6 +1051,13 @@ local function addKeybind(parent, opt, ctx)
   function h:OnPress(fn) h._press = fn return h end
 
   local listening = false
+  local clear = New("TextButton", { Name = "ClearBinding", Text = "X", AutoButtonColor = false,
+    BackgroundTransparency = 1, BorderSizePixel = 0, TextColor3 = T.Sub,
+    AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
+    Size = UDim2.fromOffset(26, 28), TextSize = 12 }, row)
+  setFont(clear, "Medium"); Paint(clear, "fg", "Sub")
+  clear.MouseButton1Click:Connect(function() listening = false; h.Set(nil) end)
+  ctx.tip(clear, "Clear binding (or press Backspace / Delete while choosing a key)")
   box.MouseButton1Click:Connect(function()
     listening = true
     kt.Text = "PRESS…"
@@ -1077,7 +1069,7 @@ local function addKeybind(parent, opt, ctx)
         listening = false
         local k = inp.KeyCode
         if k == Enum.KeyCode.Escape then h.Set(val, true)
-        elseif k == Enum.KeyCode.Backspace then h.Set(nil)
+        elseif k == Enum.KeyCode.Backspace or k == Enum.KeyCode.Delete then h.Set(nil)
         else h.Set(k) end
       elseif inp.UserInputType == Enum.UserInputType.MouseButton2
         or inp.UserInputType == Enum.UserInputType.MouseButton3 then
@@ -1391,7 +1383,14 @@ function Nova:Window(opts)
   end
   local themeB = headBtn("◐", -84, false)
   local hideB = headBtn("—", -50, false)
-  local closeB = headBtn("✕", -16, true)
+  local closeB = headBtn("", -16, true)
+  closeB.Name = "CloseWindow"
+  for _, angle in ipairs({ 45, -45 }) do
+    local line = New("Frame", { Name = "Cross", BorderSizePixel = 0,
+      BackgroundColor3 = T.Sub, AnchorPoint = Vector2.new(0.5, 0.5),
+      Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 2), Rotation = angle }, closeB)
+    Paint(line, "bg", "Sub"); Corner(line, 1)
+  end
   ctx.tip = function() end   -- replaced below once the overlay exists
 
   --// body: sidebar + pages
@@ -1979,6 +1978,44 @@ function Nova:Window(opts)
         end
         function item:Section(sopt)
           return makeSection(scroll, sopt, tabScope .. "/" .. id, pageCtx)
+        end
+        function item:SubTabs(definitions)
+          assert(not item._subtabs, "Subtabs already exist")
+          local tabs = {}
+          item._subtabs = tabs
+          local host = New("Frame", { Name = "SubTabs", BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y }, scroll)
+          List(host, 10)
+          local bar = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 32) }, host)
+          for index, def in ipairs(definitions) do
+            local key = def.Id or def.Name
+            local button = New("TextButton", { Text = def.Name, AutoButtonColor = false,
+              BackgroundColor3 = T.Elevated, TextColor3 = T.Sub, TextSize = 12, BorderSizePixel = 0,
+              Position = UDim2.new((index - 1) / #definitions, 0, 0, 0),
+              Size = UDim2.new(1 / #definitions, -4, 1, 0) }, bar)
+            setFont(button, "Medium"); Corner(button, 8); Paint(button, "bg", "Elevated")
+            local body = New("Frame", { Name = key, BackgroundTransparency = 1, Visible = false,
+              Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1 }, host)
+            List(body, 10)
+            local sub = { Instance = body, Button = button, Name = def.Name }
+            tabs[key] = sub
+            function sub:Section(options)
+              return makeSection(body, options, tabScope .. "/" .. id .. "/" .. key, pageCtx)
+            end
+            function sub:Select()
+              ctx.closePopups(nil)
+              for _, other in pairs(tabs) do
+                other.Instance.Visible = other == sub
+                other.Button.TextColor3 = Nova.Theme[other == sub and "Accent" or "Sub"]
+              end
+            end
+            button.MouseButton1Click:Connect(function() sub:Select() end)
+            Nova._refreshers[button] = function()
+              button.TextColor3 = Nova.Theme[body.Visible and "Accent" or "Sub"]
+            end
+            if index == 1 then sub:Select() end
+          end
+          return tabs
         end
         for _, method in ipairs({ "Label", "Paragraph", "Divider", "Space", "Button", "Toggle", "Slider",
           "Dropdown", "MultiDropdown", "Segmented", "Keybind", "Color", "TextBox", "Progress" }) do
