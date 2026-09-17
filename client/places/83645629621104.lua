@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "2.1-fix"
+  local MODULE_VERSION = "2.2-safe"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -49,7 +49,7 @@ return function(api)
     gen_on = false, gen_names = true, gen_range = 4000,
     gen_col = Color3.fromRGB(255, 165, 0),
     fix_key = Enum.KeyCode.B,
-    aura_on = false, aura_range = 80, aura_rate = 3,
+    aura_on = false, aura_range = 30, aura_rate = 5,
   }
 
   local HAS_DRAWING = false
@@ -607,7 +607,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Fix (the game's own repair remote, same as the prompt key)
   -- --------------------------------------------------------------------------
-  local fixBusy = false
+  local fixBusy, fixKeyCd = false, 0
   local function genProgress(e)
     if e.prog and e.prog.Parent then
       local ok, v = pcall(function() return e.prog.Value end)
@@ -643,10 +643,23 @@ return function(api)
     end)
     return ok and pr or nil
   end
-  local function fixGenerator(entry)
-    if fixBusy then return false end
+  local function fixGenerator(entry, quiet)
+    -- SAFETY FIRST: the server kicks (267) for repair packets sent from
+    -- far away. Fire ONLY inside the prompt's own reach, exactly like a
+    -- hand on E. Anything farther returns "far" and touches nothing.
+    if fixBusy then return "busy" end
     local remotes = entry.m:FindFirstChild("Remotes", true)
-    if not remotes then return false end
+    if not remotes then return "noremote" end
+    local root = myHRP()
+    if not root then return "n char" end
+    local prompt = findPrompt(entry.m)
+    local maxD = 10
+    if prompt then
+      local okD, md = pcall(function() return prompt.MaxActivationDistance end)
+      if okD and type(md) == "number" and md > 0 then maxD = md end
+    end
+    local dist = (entry.pos - root.Position).Magnitude
+    if dist ~= dist or dist > maxD + 2 then return "far", math.floor((dist ~= dist) and -1 or dist) end
     fixBusy = true
     -- watchdog: a hanging InvokeServer must never wedge the fixer forever
     task.delay(5, function() fixBusy = false end)
@@ -654,7 +667,6 @@ return function(api)
       -- full manual flow, automated: hold the prompt like E, then the
       -- game's own repair remote. Prompt-hold is what a hand repair does;
       -- the remote alone is ignored without it.
-      local prompt = findPrompt(entry.m)
       if prompt and type(fireproximityprompt) == "function" then
         pcall(fireproximityprompt, prompt)
       end
@@ -671,7 +683,7 @@ return function(api)
       end
       fixBusy = false
     end)
-    return true
+    return "ok"
   end
 
   -- --------------------------------------------------------------------------
@@ -1022,20 +1034,25 @@ return function(api)
   flagColor(genSec, "Color", "gen_col")
 
   local fixSec = pages.Fix:Section({ Name = "Repair" })
-  fixSec:Paragraph("Holds the repair prompt like E, then the generator's own remote (RF + RE). Skips finished (100%) generators.")
+  fixSec:Paragraph("Holds the repair prompt like E, then the generator's own remote. Fires ONLY inside the prompt's own reach — distant repair packets are what got people kicked (267).")
   fixSec:Button({ Name = "Fix nearest generator", Callback = function()
     local g = findNearestGen(1e9, true)
     if not g then Notify("Fix", "No unfinished generator found", "warn"); return end
-    if fixGenerator(g) then Notify("Fix", "Repair sent → " .. g.name, "ok") end
+    local res, dist = fixGenerator(g)
+    if res == "ok" then Notify("Fix", "Repair sent → " .. g.name, "ok")
+    elseif res == "far" then Notify("Fix", "Get closer (" .. tostring(dist) .. "m)", "info")
+    elseif res == "busy" then Notify("Fix", "Repair in progress…", "info") end
   end })
   fixSec:Keybind({ Name = "Fix key", Default = F.fix_key, Flag = "fs_fix_key",
     Callback = function(v) F.fix_key = v end }):OnPress(function()
-    local g = findNearestGen(tonumber(F.aura_range) or 80, true)
-    if g then
-      if fixGenerator(g) then Notify("Fix", "Repair sent → " .. g.name, "ok") end
-    else
-      Notify("Fix", "No unfinished generator in range", "info")
-    end
+    local now = os.clock()
+    if now - fixKeyCd < 1 then return end
+    fixKeyCd = now
+    local g = findNearestGen(tonumber(F.aura_range) or 30, true)
+    if not g then Notify("Fix", "No unfinished generator in range", "info"); return end
+    local res, dist = fixGenerator(g)
+    if res == "ok" then Notify("Fix", "Repair sent → " .. g.name, "ok")
+    elseif res == "far" then Notify("Fix", "Get closer (" .. tostring(dist) .. "m)", "info") end
   end)
   local auraSec = pages.Fix:Section({ Name = "Auto-fix aura" })
   auraSec:Paragraph("Repairs the nearest generator in radius on a timer. Convenient, noisy — use wisely.")
