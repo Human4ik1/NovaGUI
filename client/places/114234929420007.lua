@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.1-mouse"
+  local MODULE_VERSION = "1.2-unlock"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -469,29 +469,34 @@ return function(api)
   local statLbl, dbgLbl
   local statTick, nP = 0, 0
   local lastMenu, savedMouse = nil, nil
-  -- late-step mouse pin (see loop): re-bind cleanly on re-inject, unbind on unload
+  -- late-step mouse pin (see loop): re-bind cleanly on re-inject, unbind on unload.
+  -- Verified live: the game re-locks the pointer ~every frame from several
+  -- pipelines at once, so one RenderStep is not enough — RenderStep(100000)
+  -- + Heartbeat + Stepped together hold Default 29/30 frames (one of them
+  -- alone: 1/30). All three are cheap no-op checks while the menu is shut.
+  local function mouseForce()
+    if moduleDead then return end
+    if lastMenu == true and F.cs_mouse ~= false then
+      pcall(function()
+        if userInput.MouseBehavior ~= Enum.MouseBehavior.Default then
+          savedMouse = userInput.MouseBehavior
+          userInput.MouseBehavior = Enum.MouseBehavior.Default
+        end
+        if not userInput.MouseIconEnabled then userInput.MouseIconEnabled = true end
+      end)
+    end
+  end
   pcall(function() runService:UnbindFromRenderStep("HumaMouseUnlock") end)
   do
     local ok, err = pcall(function()
-      runService:BindToRenderStep("HumaMouseUnlock", 4000, function()
-        if moduleDead then return end
-        if lastMenu == true and F.cs_mouse ~= false then
-          pcall(function()
-            if userInput.MouseBehavior ~= Enum.MouseBehavior.Default then
-              savedMouse = userInput.MouseBehavior
-              userInput.MouseBehavior = Enum.MouseBehavior.Default
-            end
-            if not userInput.MouseIconEnabled then userInput.MouseIconEnabled = true end
-          end)
-        end
-      end)
+      runService:BindToRenderStep("HumaMouseUnlock", 100000, mouseForce)
     end)
     if not ok then
-      -- fallback: executors without BindToRenderStep keep the old one-shot
-      -- attempt in the loop (better than nothing)
       dbg.last = "mousebind: " .. tostring(err):sub(1, 60)
     end
   end
+  reg(runService.Heartbeat:Connect(mouseForce))
+  reg(runService.Stepped:Connect(mouseForce))
   reg({ Disconnect = function()
     pcall(function() runService:UnbindFromRenderStep("HumaMouseUnlock") end)
   end })
