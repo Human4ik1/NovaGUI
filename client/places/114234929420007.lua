@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.6-pipes"
+  local MODULE_VERSION = "1.8-fun"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -76,8 +76,11 @@ return function(api)
     aimed_on = false, aimed_range = 500,
     aim_on = false, aim_part = "Head", aim_fov = 15, aim_smooth = 65,
     aim_range = 1200,
-    aim_hold = "custom", aim_prio = "closest", aim_vis = true,
+    aim_hold = "always", aim_prio = "closest", aim_vis = true,
     aim_circle = false, aim_pause = true, aim_delay = 0.1,
+    aim_predict = true,
+    hb_on = false, hb_part = "Head", hb_size = 4, hb_trans = 70,
+    skin_on = false,
     aim_toggle_key = Enum.UserInputType.MouseButton3, autofire = false,
     skip_friends = true, skip_wl = true, skip_mates = true, bl_only = false,
     glow_on = false, glow_top = true,
@@ -87,7 +90,7 @@ return function(api)
     fullbright = false,
     radar_on = false, radar_range = 800, radar_size = 170, radar_corner = "BottomRight",
     cs_mouse = true,
-    aim_mode = "Assist", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.KeyCode.LeftAlt,
+    aim_mode = "Camera lock", aim_strength = 35, aim_deadzone = 2, aim_key = Enum.KeyCode.LeftAlt,
   }
 
   local HAS_DRAWING = false
@@ -366,17 +369,12 @@ return function(api)
   -- --------------------------------------------------------------------------
   local aimOn, aimSince, aimTarget, aimToggle, fireTick = false, 0, nil, false, 0
   -- autofire = pulsed left-clicks through the input layer (same as you
-  -- clicking). Capability-detected: VirtualInputManager, else mouse1press.
+  -- clicking). Order matters: mouse1click first (battle-tested in this
+  -- exact game by every public script), then press/release, then VIM.
   local fireClick = nil
   do
-    local okV, vim = pcall(function() return game:GetService("VirtualInputManager") end)
-    if okV and vim then
-      fireClick = function()
-        pcall(function() vim:SendMouseButtonEvent(0, 0, 0, true, game, 0) end)
-        task.delay(0.03, function()
-          pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, game, 0) end)
-        end)
-      end
+    if type(mouse1click) == "function" then
+      fireClick = function() pcall(mouse1click) end
     elseif type(mouse1press) == "function" then
       fireClick = function()
         pcall(mouse1press)
@@ -386,8 +384,16 @@ return function(api)
           end)
         end)
       end
-    elseif type(mouse1click) == "function" then
-      fireClick = function() pcall(mouse1click) end
+    else
+      local okV, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+      if okV and vim then
+        fireClick = function()
+          pcall(function() vim:SendMouseButtonEvent(0, 0, 0, true, game, 0) end)
+          task.delay(0.03, function()
+            pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, game, 0) end)
+          end)
+        end
+      end
     end
   end
   local wlSet, blSet, friendSet, frSet = {}, {}, {}, {}
@@ -408,6 +414,22 @@ return function(api)
     local hrp = model:FindFirstChild("HumanoidRootPart")
     return hrp and hrp.Position or nil
   end
+  -- velocity lead for moving targets (scene-proven formula): farther =
+  -- longer lead, clamped. Applied to the lock point, not the camera.
+  local function aimLead(target, origin, who)
+    if F.aim_predict == false then return target end
+    local model = nil
+    if typeof(who) == "Instance" then
+      model = who:IsA("Player") and charOf(who) or who
+    end
+    local hrp = model and model:FindFirstChild("HumanoidRootPart")
+    local vel = hrp and hrp.AssemblyLinearVelocity or nil
+    if not vel or vel.Magnitude > 200 or vel.Magnitude ~= vel.Magnitude then return target end
+    local dist = (target - origin).Magnitude
+    if dist ~= dist then return target end
+    local k = clamp(0.05 + dist / 2000, 0.02, 0.12)
+    return target + vel * k
+  end
   local function hubOpen()
     local ok, vis = pcall(function() return api.Win:IsVisible() end)
     if ok and type(vis) == "boolean" then return vis end
@@ -420,6 +442,120 @@ return function(api)
     if key.EnumType == Enum.KeyCode then return userInput:IsKeyDown(key) end
     if key.EnumType == Enum.UserInputType then return userInput:IsMouseButtonPressed(key) end
     return false
+  end
+
+  -- --------------------------------------------------------------------------
+  -- Hitbox expander + skin changer (both strictly local visuals)
+  -- Hitbox only converts to hits if the server trusts client "Trace"
+  -- reports — try it, watch killfeed, keep OFF if nothing changes. Sizes
+  -- restore on toggle-off/unload.
+  -- --------------------------------------------------------------------------
+  local hbOrig = {}
+  local function applyHitbox()
+    if not F.hb_on then
+      for part, o in pairs(hbOrig) do
+        pcall(function()
+          if part.Parent then part.Size = o.s; part.Transparency = o.t end
+        end)
+      end
+      for k in pairs(hbOrig) do hbOrig[k] = nil end
+      return
+    end
+    local want = (F.hb_part == "HumanoidRootPart") and "HumanoidRootPart" or "Head"
+    local seen = {}
+    for _, pl in ipairs(players:GetPlayers()) do
+      if pl ~= LP and not isMate(pl) and aimAllowed(pl) then
+        local ch = charOf(pl)
+        local part = ch and ch:FindFirstChild(want)
+        if part and part:IsA("BasePart") and not attrDead(ch) then
+          seen[part] = true
+          if not hbOrig[part] then hbOrig[part] = { s = part.Size, t = part.Transparency } end
+          local s = clamp(tonumber(F.hb_size) or 4, 1, 12)
+          local tr = clamp((tonumber(F.hb_trans) or 70) / 100, 0, 1)
+          pcall(function()
+            part.Size = Vector3.new(s, s, s)
+            part.Transparency = tr
+            part.CanCollide = false
+          end)
+        end
+      end
+    end
+    for part, o in pairs(hbOrig) do
+      if not seen[part] then
+        pcall(function()
+          if part.Parent then part.Size = o.s; part.Transparency = o.t end
+        end)
+        hbOrig[part] = nil
+      end
+    end
+  end
+  local skinSel = {} -- gun -> skin name, persisted as "gun=skin" strings
+  local function skinsRead()
+    skinSel = {}
+    local function arr()
+      if NovaUI and NovaUI.Flags and type(NovaUI.Flags.pd_skins) == "table" then
+        return NovaUI.Flags.pd_skins
+      end
+      local L = NovaUI and NovaUI._loaded
+      if type(L) == "table" and type(L.pd_skins) == "table" then return L.pd_skins end
+      return {}
+    end
+    for _, e in ipairs(arr()) do
+      local g, s = tostring(e):match("^(.-)=(.-)$")
+      if g and s and g ~= "" and s ~= "" then skinSel[g] = s end
+    end
+  end
+  local function skinsWrite()
+    if NovaUI and NovaUI.Flags then
+      local o = {}
+      for g, s in pairs(skinSel) do o[#o + 1] = g .. "=" .. s end
+      table.sort(o)
+      NovaUI.Flags.pd_skins = o
+    end
+  end
+  local function findViewmodel()
+    if not camera then return nil end
+    local vm = camera:FindFirstChild("Viewmodel")
+    if vm and vm:IsA("Model") then return vm end
+    for _, c in ipairs(camera:GetChildren()) do
+      if c:IsA("Model") and c:FindFirstChild("Weapon") then return c end
+    end
+    return nil
+  end
+  local function applySkins()
+    if not F.skin_on then return end
+    local vm = findViewmodel()
+    if not vm then return end
+    local assets = game:GetService("ReplicatedStorage"):FindFirstChild("Assets")
+    local skins = assets and assets:FindFirstChild("Skins")
+    if not skins then return end
+    for gun, skin in pairs(skinSel) do
+      if vm.Name == gun then
+        local wfold = skins:FindFirstChild(gun)
+        local sfold = wfold and wfold:FindFirstChild(skin)
+        local src = sfold and sfold:FindFirstChild("Camera")
+        if src then
+          local weapon = vm:FindFirstChild("Weapon")
+          local scope = weapon or vm
+          for _, obj in ipairs(src:GetChildren()) do
+            local part = scope:FindFirstChild(obj.Name, true)
+            if part and part:IsA("BasePart") then
+              pcall(function()
+                for _, o in ipairs(part:GetChildren()) do
+                  if o:IsA("SurfaceAppearance") and o.Name ~= "HumaSkin" then o:Destroy() end
+                end
+                if obj:IsA("SurfaceAppearance") then
+                  local n = obj:Clone()
+                  n.Name = "HumaSkin"
+                  n.Parent = part
+                end
+                if part:IsA("MeshPart") then part.TextureID = "" end
+              end)
+            end
+          end
+        end
+      end
+    end
   end
 
   -- --------------------------------------------------------------------------
@@ -494,6 +630,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
   local statTick, nP = 0, 0
+  local hbTick, skinTick = 0, 0
   local lastMenu, savedMouse = nil, nil
   -- click veil: fullscreen invisible button UNDER our window (DisplayOrder
   -- 40 < Nova's 50). Free cursor alone is not enough: clicks landing on
@@ -868,6 +1005,7 @@ return function(api)
             end
           end
           if best then
+            best = aimLead(best, origin, bestPl)
             if bestPl ~= aimTarget then
               aimTarget = bestPl
               aimSince = now
@@ -946,6 +1084,9 @@ return function(api)
 
       gcGlow(seenGlow)
 
+      if now - hbTick > 0.5 then hbTick = now; guarded("hitbox", applyHitbox) end
+      if now - skinTick > 1 then skinTick = now; guarded("skins", applySkins) end
+
       if statLbl and now - statTick > 2 then
         statTick = now
         pcall(function()
@@ -978,6 +1119,12 @@ return function(api)
     for k in pairs(glowMap) do glowMap[k] = nil end
     for k in pairs(glowSeenT) do glowSeenT[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
+    for part, o in pairs(hbOrig) do
+      pcall(function()
+        if part.Parent then part.Size = o.s; part.Transparency = o.t end
+      end)
+      hbOrig[part] = nil
+    end
     pcall(function()
       if savedMouse then userInput.MouseBehavior = savedMouse; savedMouse = nil end
     end)
@@ -1020,6 +1167,7 @@ return function(api)
   local menuDefs = {
     { "ESP", "□", "Players and highlights" },
     { "Aim", "◎", "Camera assistance" },
+    { "Skins", "✦", "Viewmodel skins (local only)" },
     { "World", "◈", "Lighting, radar, mouse" },
     { "About", "i", "Status" },
   }
@@ -1276,34 +1424,108 @@ return function(api)
   flagColor(gSec, "Teammate glow", "glow_friend")
 
   local aSec = pages.Aim:Section({ Name = "Aim-assist" })
-  aSec:Paragraph("Camera only — no packets. Toggle mode: tap the key once and the crosshair sticks to heads by itself (walls still skip). MMB by default, rebind below.")
+  aSec:Paragraph("3 steps, nothing else: 1) Aimbot ON 2) Autofire ON 3) close the menu and walk. Active locks show as LOCK in About.")
+  flagToggle(aSec, "Aimbot", "aim_on", "Master magnet to heads (Trigger below can limit it)")
+  flagToggle(aSec, "Autofire", "autofire",
+    "Clicks for you while locked on (input layer, like a real click). Off while the menu is open or you're dead.")
+  if not fireClick then
+    aSec:Paragraph("WARNING: this executor exposes no input simulation (no mouse1click / press / VIM) — autofire cannot work here.")
+  end
   aSec:Keybind({ Name = "Aim toggle key", Default = F.aim_toggle_key, Flag = "pd_aim_toggle",
-    Tooltip = "Tap to lock/unlock persistent aim",
+    Tooltip = "Tap to force the magnet on/off regardless of Trigger",
     Callback = function(v) F.aim_toggle_key = v end }):OnPress(function()
     aimToggle = not aimToggle
     Notify("Aim", aimToggle and "Aim magnet ON" or "Aim magnet OFF", aimToggle and "ok" or "info")
   end)
-  flagToggle(aSec, "Autofire", "autofire",
-    "Clicks for you while locked on (input layer, like a real click). Off while the menu is open or you're dead.")
-  if not fireClick then
-    aSec:Paragraph("WARNING: this executor exposes no input simulation (no VirtualInputManager / mouse1press) — autofire cannot work here.")
-  end
   flagDropdown(aSec, "Mode", "aim_mode", { "Assist", "Camera lock" })
   flagSlider(aSec, "Assist turn speed", "aim_strength", 1, 180, { suf = "deg/s" })
   flagSlider(aSec, "Assist dead zone", "aim_deadzone", 0, 10, { dec = 1, suf = "deg" })
-  flagToggle(aSec, "Enabled", "aim_on")
   flagDropdown(aSec, "Aim part", "aim_part", { "Head", "UpperTorso", "HumanoidRootPart" })
   flagSlider(aSec, "FOV", "aim_fov", 5, 45)
   flagSlider(aSec, "Max range", "aim_range", 100, 3000, { suf = "m", tip = "Never lock past this distance" })
   flagSlider(aSec, "Smoothness", "aim_smooth", 1, 100, { tip = "Higher = slower, more human" })
   flagSlider(aSec, "Target delay", "aim_delay", 0, 0.5, { dec = 2, suf = "s", tip = "Reaction delay on new targets" })
-  flagDropdown(aSec, "Trigger", "aim_hold", { "right", "left", "always", "custom" })
+  flagDropdown(aSec, "Trigger (when magnet may pull)", "aim_hold", { "always", "right", "left", "custom" })
   aSec:Keybind({ Name = "Custom aim key", Default = F.aim_key, Flag = "pd_aim_key",
     Callback = function(v) F.aim_key = v end })
   flagDropdown(aSec, "Priority", "aim_prio", { "closest", "distance" })
   flagToggle(aSec, "Visible check", "aim_vis", "Skip targets behind walls")
+  flagToggle(aSec, "Prediction", "aim_predict", "Lead moving targets by velocity (farther = longer lead)")
+  local hbSec = pages.Aim:Section({ Name = "Hitbox" })
+  hbSec:Paragraph("Enlarges enemy heads client-side. Converts to hits ONLY if the server trusts client Trace reports — try it, watch the killfeed, turn OFF if nothing changes. Restores on off/unload.")
+  flagToggle(hbSec, "Hitbox expander", "hb_on")
+  flagDropdown(hbSec, "Part", "hb_part", { "Head", "HumanoidRootPart" })
+  flagSlider(hbSec, "Size", "hb_size", 1, 12, { suf = "st" })
+  flagSlider(hbSec, "Transparency", "hb_trans", 0, 100,
+    { tip = "0 = solid giant head (obvious), 100 = invisible", suf = "%" })
   flagToggle(aSec, "FOV circle", "aim_circle")
   flagToggle(aSec, "Pause while hub open", "aim_pause")
+
+  local skSec = pages.Skins:Section({ Name = "Skins" })
+  skSec:Paragraph("Viewmodel paint, local only — enemies see nothing different. Pick a gun, pick a skin, it sticks (saved in profile).")
+  flagToggle(skSec, "Skin changer", "skin_on")
+  local skinGuns = {}
+  do
+    local assets = game:GetService("ReplicatedStorage"):FindFirstChild("Assets")
+    local skins = assets and assets:FindFirstChild("Skins")
+    if skins then
+      for _, w in ipairs(skins:GetChildren()) do
+        if w:IsA("Folder") then skinGuns[#skinGuns + 1] = w.Name end
+      end
+      table.sort(skinGuns)
+    end
+    if #skinGuns == 0 then skinGuns = { "AK-47", "M4A4", "AWP", "Desert Eagle" } end
+  end
+  local skinGun, skinPick, skinDrop
+  local function skinOptions(gun)
+    local o = {}
+    local assets = game:GetService("ReplicatedStorage"):FindFirstChild("Assets")
+    local skins = assets and assets:FindFirstChild("Skins")
+    local w = skins and skins:FindFirstChild(gun)
+    if w then
+      for _, s in ipairs(w:GetChildren()) do o[#o + 1] = s.Name end
+      table.sort(o)
+    end
+    if #o == 0 then o = { "Stock" } end
+    return o
+  end
+  skinGun = skinGuns[1]
+  skSec:Dropdown({ Name = "Weapon", Options = skinGuns, Default = skinGun, Flag = "pd_skin_gun",
+    Callback = function(v)
+      skinGun = tostring(v)
+      local opts = skinOptions(skinGun)
+      skinPick = skinSel[skinGun] or opts[1]
+      if skinDrop then
+        skinDrop.SetOptions(opts)
+        skinDrop.Set(skinPick, true)
+      end
+    end })
+  do
+    local opts = skinOptions(skinGun)
+    skinPick = opts[1]
+    skinDrop = skSec:Dropdown({ Name = "Skin", Options = opts, Default = skinPick, Flag = "pd_skin_pick",
+      Callback = function(v)
+        skinPick = tostring(v)
+        if skinGun then skinSel[skinGun] = skinPick; skinsWrite() end
+      end })
+  end
+  skSec:Button({ Name = "Apply now", Variant = "ghost", Callback = function()
+    skinsRead()
+    if skinGun and skinPick then skinSel[skinGun] = skinPick; skinsWrite() end
+    applySkins()
+    Notify("Skins", "Applied " .. tostring(skinGun) .. " / " .. tostring(skinPick), "ok")
+  end })
+  if task ~= nil then
+    task.defer(function()
+      pcall(skinsRead)
+      pcall(function()
+        if skinGun and skinSel[skinGun] and skinDrop then
+          skinPick = skinSel[skinGun]
+          skinDrop.Set(skinPick, true)
+        end
+      end)
+    end)
+  end
 
   local wSec = pages.World:Section({ Name = "Lighting" })
   wSec:Toggle({ Name = "Fullbright", Desc = "Always daylight, no dark corners",
