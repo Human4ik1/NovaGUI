@@ -830,12 +830,12 @@ return function(api)
     task.spawn(function()
       local door = nearest -- loop var 'entry' dies with the loop; capture it
       local ok, err = pcall(function()
-        -- phase walk: teleport gets reverted by the server, so do it the
-        -- manual way, automated. Face-pin the door like an aim lock,
-        -- noclip ON, walk straight through the slab for ~1s while spamming
-        -- the same open packet as F. Yank-backs mid-walk don't matter: the
-        -- walk resumes from wherever you are and the spam never stops.
-        local dp = door.root.Position
+        -- aim at the DOOR'S MIDDLE, not entry.root: the scan keeps the
+        -- first BasePart it finds, which is often the Hinge at the side
+        -- of the doorway — walking at it phases you through the wall
+        -- next to the door. Bounding-box center is the true middle.
+        local boxCF = select(1, boxOf(door.m))
+        local dp = (boxCF and boxCF.Position) or door.root.Position
         local dir0 = Vector3.new(dp.X - root.Position.X, 0, dp.Z - root.Position.Z)
         if dir0.Magnitude < 0.05 then
           local lv = root.CFrame.LookVector
@@ -843,6 +843,8 @@ return function(api)
           if dir0.Magnitude < 0.05 then dir0 = Vector3.new(0, 0, 1) end
         end
         dir0 = dir0.Unit
+        -- (walk length is measured live against an exit point 3m past the
+        -- middle, so any Reach distance works and yanks just mean walking.)
         local ch = myChar()
         local parts = {}
         if ch then
@@ -853,10 +855,16 @@ return function(api)
         local hum = ch and ch:FindFirstChildOfClass("Humanoid")
         local autoWas = (hum and hum.AutoRotate) ~= false
         if hum then pcall(function() hum.AutoRotate = false end) end
+        -- exit point: 3m past the middle along the walk line. Measured
+        -- from the LIVE position every frame, so a server yank-back just
+        -- means more walking instead of an early stop mid-slab.
+        local exitPt = Vector3.new(dp.X + dir0.X * 3, root.Position.Y, dp.Z + dir0.Z * 3)
         local t0, lastFire = os.clock(), 0
-        while os.clock() - t0 < 1.1 do
+        while os.clock() - t0 < 4 do
           if not root.Parent then break end
           local rp = root.Position
+          local toExit = Vector3.new(exitPt.X - rp.X, 0, exitPt.Z - rp.Z)
+          if toExit.Magnitude < 0.7 then break end
           local look = Vector3.new(dp.X, rp.Y, dp.Z)
           local step = 6 / 60
           root.CFrame = CFrame.new(
@@ -1688,7 +1696,7 @@ return function(api)
   flagSlider(doorSec, "Max distance", "door_range", 10, 1000, { suf = "m" })
   flagColor(doorSec, "Color", "door_color")
   local doorActionSec = pages.World:Section({ Name = "Door interaction" })
-  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the nearest door, noclips you straight through it for ~1s and spams the same open packet as F the whole way. Server yank-backs don't matter — the walk resumes and the spam never stops until the second is over.")
+  doorActionSec:Paragraph("PRESS the key once (no holding, no loops): aim-locks the middle of the nearest door, noclips you straight through it and spams the same open packet as F the whole way. Walks until 3m past the door (max ~4s) — server yank-backs just mean more walking.")
   flagToggle(doorActionSec, "Door assist", "door_assist")
   flagSlider(doorActionSec, "Reach", "door_reach", 1, 15, { suf = "m" })
   doorActionSec:Keybind({ Name = "Interact key", Default = F.door_key, Flag = "pd_door_key",
