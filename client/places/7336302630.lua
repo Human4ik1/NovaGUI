@@ -844,15 +844,34 @@ return function(api)
         end)
         local dp = door.root.Position
         local target = Vector3.new(dp.X + flat.X * side * depth, root.Position.Y, dp.Z + flat.Z * side * depth)
-        -- step through, face the door, knock from the inside: the first
-        -- packet goes out in the SAME frame as the step (before the server
-        -- can pull you back), two more follow in case the yank is instant.
+        -- pin the turn: while movement keys are held the Humanoid re-faces
+        -- the walk direction every frame and would instantly undo our CFrame,
+        -- so AutoRotate goes off for the burst (restored right after).
+        local ch = myChar()
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        local autoWas = (hum and hum.AutoRotate) ~= false
+        if hum then pcall(function() hum.AutoRotate = false end) end
+        pcall(function()
+          root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+          root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+        -- step through, face the door, swing the camera onto it as well
         root.CFrame = CFrame.new(target, Vector3.new(dp.X, target.Y, dp.Z))
+        pcall(function()
+          local cam = workspace.CurrentCamera
+          if cam then
+            cam.CFrame = CFrame.new(cam.CFrame.Position, Vector3.new(dp.X, cam.CFrame.Position.Y, dp.Z))
+          end
+        end)
+        -- knock from the inside: the first packet goes out in the SAME frame
+        -- as the step (before the server can pull you back), two more follow
         for _ = 1, 3 do
           local p = root.Position
           pcall(function() rem:FireServer(nearest.m, 0, p.X, p.Y, p.Z) end)
           task.wait(0.05)
         end
+        task.wait(0.15)
+        if hum then pcall(function() hum.AutoRotate = autoWas end) end
       end)
       if ok then Notify("Doors", "Phase burst → " .. tostring(nearest.name), "ok")
       else Notify("Doors", tostring(err), "warn") end
