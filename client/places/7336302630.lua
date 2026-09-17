@@ -17,7 +17,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "2.14-glowfix"
+  local MODULE_VERSION = "2.15-adorn"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -86,7 +86,7 @@ return function(api)
     glow_drop = Color3.fromRGB(120, 220, 255),
     glow_quest = Color3.fromRGB(190, 120, 255),
     glow_star = Color3.fromRGB(255, 210, 90),
-    glow_lootcap = 10,
+    glow_lootcap = 10, loot_glowmode = "Boxes",
     loot_cont = false, loot_drop = false, loot_quest = false,
     loot_hl = false, loot_keys = "card,key,defib,ledx,bitcoin,gpu,military, thermal, red, violet, gold",
     loot_col = Color3.fromRGB(120, 220, 255),
@@ -760,6 +760,49 @@ return function(api)
       end
     end
   end
+  -- Unlimited box overlay for loot: BoxHandleAdornment has NO engine render
+  -- cap (unlike Highlight's ~31), so a fat loot room can show every crate.
+  -- Wireframe boxes instead of filled chams — function over beauty.
+  local adornMap, ADORN_SOFT_CAP = {}, 100
+  local function setAdorn(model, col, on)
+    if not model or not model.Parent then return nil end
+    local key = glowKey(model, "a")
+    local prev = adornMap[key]
+    if not on then
+      if prev then pcall(function() prev:Destroy() end) end
+      adornMap[key] = nil
+      return nil
+    end
+    if prev and prev.Parent then
+      pcall(function()
+        if prev.Color3 ~= col then prev.Color3 = col end
+        prev.AlwaysOnTop = F.glow_top == true
+      end)
+      return key
+    end
+    local ok, ad = pcall(function()
+      local a = Instance.new("BoxHandleAdornment")
+      a.Name = "LootFX"
+      a.Adornee = model
+      if model:IsA("BasePart") then a.Size = model.Size end
+      a.Color3 = col
+      a.Transparency = 0.3
+      a.AlwaysOnTop = F.glow_top == true
+      a.ZIndex = 1
+      a.Parent = model
+      return a
+    end)
+    if ok and ad then adornMap[key] = ad; return key end
+    return nil
+  end
+  local function gcAdorn(seen)
+    for k, a in pairs(adornMap) do
+      if not seen[k] then
+        pcall(function() a:Destroy() end)
+        adornMap[k] = nil
+      end
+    end
+  end
 
   -- --------------------------------------------------------------------------
   -- Persistent player rigs (universal-style): objects are created ONCE per
@@ -1009,7 +1052,7 @@ return function(api)
       frameMe = me
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
-      local seenGlow = {}
+      local seenGlow, seenAdorn = {}, {}
       glowUsedEntity, glowUsedLoot = 0, 0 -- per-frame budget reset, both pools
       nP, nC, nL, nB = 0, 0, 0, 0
 
@@ -1355,19 +1398,27 @@ return function(api)
                 -- lootCache is sorted nearest-first (see scanWorld), so
                 -- stopping once the loot pool is full still glows the
                 -- closest crates, not an arbitrary subset
-                local lootCap = clamp(math.floor(F.glow_lootcap or GLOW_LOOT_CAP), 1, GLOW_LOOT_CAP)
-                if F.glow_loot and glowUsedLoot < lootCap
-                  and it.m and it.m.Parent then
+                if F.glow_loot and it.m and it.m.Parent then
                   local gc = it.star and F.glow_star
                     or (it.kind == "drop" and F.glow_drop
                       or (it.kind == "quest" and F.glow_quest or F.glow_cont))
-                  -- seen key MUST match setGlow's internal glowKey(model,"l"):
-                  -- a GetDebugId-based key never matched, so gcGlow destroyed
-                  -- every loot highlight in the same frame it was created and
-                  -- crate/item glow never rendered at all.
-                  local key = glowKey(it.m, "l")
-                  setGlow(it.m, gc, true, "l", "loot")
-                  seenGlow[key] = true
+                  if F.loot_glowmode == "Boxes" then
+                    -- unlimited path: wireframe adornments ignore the ~31
+                    -- Highlight ceiling — every crate in range gets a box
+                    local akey = setAdorn(it.m, gc, true)
+                    if akey then seenAdorn[akey] = true end
+                  else
+                    local lootCap = clamp(math.floor(F.glow_lootcap or GLOW_LOOT_CAP), 1, GLOW_LOOT_CAP)
+                    if glowUsedLoot < lootCap then
+                      -- seen key MUST match setGlow's internal glowKey(model,"l"):
+                      -- a GetDebugId-based key never matched, so gcGlow destroyed
+                      -- every loot highlight in the same frame it was created and
+                      -- crate/item glow never rendered at all.
+                      local key = glowKey(it.m, "l")
+                      setGlow(it.m, gc, true, "l", "loot")
+                      seenGlow[key] = true
+                    end
+                  end
                 end
               end
             end
@@ -1615,6 +1666,7 @@ return function(api)
       end)
 
       gcGlow(seenGlow)
+      gcAdorn(seenAdorn)
 
       if statLbl and now - statTick > 2 then
         statTick = now
@@ -1652,6 +1704,8 @@ return function(api)
     freeTransient()
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
+    for _, a in pairs(adornMap) do pcall(function() a:Destroy() end) end
+    for k in pairs(adornMap) do adornMap[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
     for _, maps in ipairs({ lootMap, corpseMap, npcMap, exitMap, botMap, doorMap, mineMap }) do
       for m, o in pairs(maps) do
@@ -1777,6 +1831,10 @@ return function(api)
   local commonLoot = lootTabs.Filters:Section({ Name = "Shared loot settings" })
   flagToggle(commonLoot, "Loot glow", "glow_loot", "Applies to enabled loot categories")
   flagSlider(commonLoot, "Highlight budget", "glow_lootcap", 1, 10)
+  commonLoot:Segmented({ Name = "Glow mode", Options = { "Boxes", "Highlight" },
+    Default = F.loot_glowmode, Flag = "pd_loot_glowmode",
+    Tooltip = "Boxes = wireframe, NO engine cap, every crate in range. Highlight = filled chams, capped ~10 by the engine.",
+    Callback = function(v) F.loot_glowmode = tostring(v) end })
   flagSlider(commonLoot, "Max distance", "loot_range", 200, 4000, { suf = "m" })
   flagToggle(commonLoot, "Keyword star", "loot_hl")
   commonLoot:TextBox({ Name = "Keywords", Default = F.loot_keys, Flag = "pd_loot_keys",
@@ -1866,6 +1924,8 @@ return function(api)
       for _, entry in ipairs(cache) do entry.lbl = nil end
     end
     for key, highlight in pairs(glowMap) do pcall(function() highlight:Destroy() end); glowMap[key] = nil end
+    for key, adorn in pairs(adornMap) do pcall(function() adorn:Destroy() end); adornMap[key] = nil end
+    for key, adorn in pairs(adornMap) do pcall(function() adorn:Destroy() end); adornMap[key] = nil end
     HAS_DRAWING = pcall(function() local probe = Drawing.new("Square"); probe:Remove() end)
     guarded("labels", syncLabelMaps)
     Notify("Delta", HAS_DRAWING and "Overlays rebuilt" or "Drawing API unavailable", HAS_DRAWING and "ok" or "warn")
