@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.4-input"
+  local MODULE_VERSION = "1.5-aim"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -78,6 +78,7 @@ return function(api)
     aim_range = 1200,
     aim_hold = "custom", aim_prio = "closest", aim_vis = true,
     aim_circle = false, aim_pause = true, aim_delay = 0.1,
+    aim_toggle_key = Enum.UserInputType.MouseButton3, autofire = false,
     skip_friends = true, skip_wl = true, skip_mates = true, bl_only = false,
     glow_on = false, glow_top = true,
     glow_vis = false, glow_viscol = Color3.fromRGB(255, 255, 255), glow_visthick = 3,
@@ -363,7 +364,32 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Aim state + white/black/friend lists (persisted via profile flags)
   -- --------------------------------------------------------------------------
-  local aimOn, aimSince, aimTarget = false, 0, nil
+  local aimOn, aimSince, aimTarget, aimToggle, fireTick = false, 0, nil, false, 0
+  -- autofire = pulsed left-clicks through the input layer (same as you
+  -- clicking). Capability-detected: VirtualInputManager, else mouse1press.
+  local fireClick = nil
+  do
+    local okV, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if okV and vim then
+      fireClick = function()
+        pcall(function() vim:SendMouseButtonEvent(0, 0, 0, true, game, 0) end)
+        task.delay(0.03, function()
+          pcall(function() vim:SendMouseButtonEvent(0, 0, 0, false, game, 0) end)
+        end)
+      end
+    elseif type(mouse1press) == "function" then
+      fireClick = function()
+        pcall(mouse1press)
+        task.delay(0.03, function()
+          pcall(function()
+            if type(mouse1release) == "function" then mouse1release() end
+          end)
+        end)
+      end
+    elseif type(mouse1click) == "function" then
+      fireClick = function() pcall(mouse1click) end
+    end
+  end
   local wlSet, blSet, friendSet, frSet = {}, {}, {}, {}
   local function aimAllowed(pl)
     local id = tostring(pl.UserId)
@@ -835,12 +861,13 @@ return function(api)
               aimSince = now
             end
             local hold = F.aim_hold
-            if now - aimSince >= (F.aim_delay or 0)
-              and (hold == "always"
+            local holdActive = aimToggle
+              or (hold == "always"
                 or (hold == "right" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2))
                 or (hold == "left" and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))
                 or (hold == "custom" and F.aim_key and ((F.aim_key.EnumType == Enum.KeyCode and userInput:IsKeyDown(F.aim_key))
-                  or (F.aim_key.EnumType == Enum.UserInputType and userInput:IsMouseButtonPressed(F.aim_key))))) then
+                  or (F.aim_key.EnumType == Enum.UserInputType and userInput:IsMouseButtonPressed(F.aim_key)))))
+            if now - aimSince >= (F.aim_delay or 0) and holdActive then
               local base = clamp(1 - ((F.aim_smooth or 65) / 101), 0.05, 0.99)
               local step = clamp(math.max(dt or (1 / 60), 1 / 480) * 60, 0.05, 4)
               local alpha = clamp(1 - (1 - base) ^ step, 0.01, 1)
@@ -857,6 +884,16 @@ return function(api)
             aimTarget = nil
           end
         end)
+      end
+
+      -- autofire: pulsed clicks while locked on. Never with the menu open
+      -- (those clicks belong to the menu), never while dead.
+      if F.autofire and aimOn and fireClick and not hubOpen() then
+        local mc = myChar()
+        if mc and not attrDead(mc) and meHRP and now - fireTick > 0.13 then
+          fireTick = now
+          fireClick()
+        end
       end
 
       -- fov circle + lock dot + aimed-at dot
@@ -1227,7 +1264,18 @@ return function(api)
   flagColor(gSec, "Teammate glow", "glow_friend")
 
   local aSec = pages.Aim:Section({ Name = "Aim-assist" })
-  aSec:Paragraph("Camera only — no packets, no autofire. Hold LeftAlt by default (RMB is firemode on most guns here — rebind Custom aim key if you like). Teammates are never targeted.")
+  aSec:Paragraph("Camera only — no packets. Toggle mode: tap the key once and the crosshair sticks to heads by itself (walls still skip). MMB by default, rebind below.")
+  aSec:Keybind({ Name = "Aim toggle key", Default = F.aim_toggle_key, Flag = "pd_aim_toggle",
+    Tooltip = "Tap to lock/unlock persistent aim",
+    Callback = function(v) F.aim_toggle_key = v end }):OnPress(function()
+    aimToggle = not aimToggle
+    Notify("Aim", aimToggle and "Aim magnet ON" or "Aim magnet OFF", aimToggle and "ok" or "info")
+  end)
+  flagToggle(aSec, "Autofire", "autofire",
+    "Clicks for you while locked on (input layer, like a real click). Off while the menu is open or you're dead.")
+  if not fireClick then
+    aSec:Paragraph("WARNING: this executor exposes no input simulation (no VirtualInputManager / mouse1press) — autofire cannot work here.")
+  end
   flagDropdown(aSec, "Mode", "aim_mode", { "Assist", "Camera lock" })
   flagSlider(aSec, "Assist turn speed", "aim_strength", 1, 180, { suf = "deg/s" })
   flagSlider(aSec, "Assist dead zone", "aim_deadzone", 0, 10, { dec = 1, suf = "deg" })
