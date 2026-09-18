@@ -16,7 +16,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "2.4-noremote"
+  local MODULE_VERSION = "2.5-pace"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -39,7 +39,7 @@ return function(api)
     esp_killercol = Color3.fromRGB(220, 20, 60),
     esp_survcol = Color3.fromRGB(138, 43, 226),
     alert_on = false, alert_range = 200,
-    flow_on = false, stam_on = false,
+    flow_on = false, flow_node = 0.05, flow_line = 0.5, stam_on = false,
     build_col = Color3.fromRGB(255, 80, 0),
     glow_killer = false, glow_surv = false, glow_top = true,
     glow_killercol = Color3.fromRGB(220, 20, 60),
@@ -504,9 +504,11 @@ return function(api)
   end
   local function flowSolve(puzzle)
     if not puzzle or not puzzle.Solution then return end
-    -- max speed, event-driven: no per-node/per-line sleeps. Lines are
-    -- written back-to-back and checkForWin runs immediately after each —
-    -- the win check itself drives the flow, not timers.
+    -- human pacing on purpose: instant solving trips the server's speed
+    -- check and kicks. Node/line pauses are configurable, defaults are
+    -- the previously-kick-free values.
+    local nodeD = tonumber(F.flow_node) or 0.05
+    local lineD = tonumber(F.flow_line) or 0.5
     for ci = 1, #puzzle.Solution do
       if moduleDead or not F.flow_on then return end
       local solution = puzzle.Solution[ci]
@@ -539,9 +541,12 @@ return function(api)
         end
         puzzle.paths[ci] = {}
         for _, node in ipairs(ordered) do
+          if moduleDead or not F.flow_on then return end
           table.insert(puzzle.paths[ci], { row = node.row, col = node.col })
+          pcall(function() puzzle:updateGui() end)
+          if nodeD > 0 then task.wait(nodeD) end
         end
-        pcall(function() puzzle:updateGui() end)
+        if lineD > 0 then task.wait(lineD) end
         pcall(function() puzzle:checkForWin() end)
       end
     end
@@ -971,6 +976,10 @@ return function(api)
       F.flow_on = v == true
       if v then task.spawn(function() guarded("flowhook", flowHook) end) end
     end })
+  flagSlider(flowSec, "Node pause", "flow_node", 0, 0.5, { dec = 2, suf = "s",
+    tip = "Pause between path nodes — 0 = instant (kick risk)" })
+  flagSlider(flowSec, "Line pause", "flow_line", 0, 2, { dec = 1, suf = "s",
+    tip = "Pause between solved lines — 0 = instant (kick risk)" })
   local stamSec = pages.Fix:Section({ Name = "Stamina" })
   stamSec:Paragraph("Zeroes stamina drain via the game's sprint table. Restored on off/unload.")
   flagToggle(stamSec, "Infinite stamina", "stam_on")
