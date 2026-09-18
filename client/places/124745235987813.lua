@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hubs)
-  local MODULE_VERSION = "1.10-rubble"
+  local MODULE_VERSION = "1.11-podprompt"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -379,11 +379,21 @@ return function(api)
     end
   end
   local function podiumPos()
+    -- aim at the PROMPT, not the podium middle: the model bbox center can
+    -- sit a dozen meters from the sell prompt, and then the tour hops
+    -- around a spot the sale can never trigger from. Prompt parent first.
     local ok, pod = pcall(function()
       local pav = workspace:FindFirstChild("Pavilion")
       return pav and pav:FindFirstChild("SellPodium") or nil
     end)
     if not ok or not pod then return nil end
+    local okP, pr = pcall(function()
+      return pod:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end)
+    if okP and pr and pr.Parent then
+      local okQ, pp = pcall(function() return pr.Parent.Position end)
+      if okQ and pp then return pp end
+    end
     local ok2, cf = pcall(function() return pod:GetBoundingBox() end)
     if ok2 and cf then return cf.Position end
     return nil
@@ -463,8 +473,14 @@ return function(api)
     tourTarget = dest
     local dist = (dest - hrp.Position).Magnitude
     local pause = tonumber(F.tour_pause) or 0.5
+    -- arrived (any mode): hold, let server register, no more hops
+    if dist < 5 then
+      pcall(function() hum:MoveTo(hrp.Position) end)
+      tourWaitUntil = now + pause
+      return
+    end
     if mode == "Teleport" then
-      -- hop in, pause for the server to register, next
+      -- hop in (only when not arrived — see above), pause, next
       pcall(function()
         hrp.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
       end)
@@ -474,15 +490,7 @@ return function(api)
     -- Walk / Noclip: MoveTo ONLY — never touch HRP CFrame while walking.
     -- Rewriting CFrame every tick (even rotation-only) cancels the active
     -- MoveTo, so the character twitches in place forever. Facing is the
-    -- humanoid's own job (AutoRotate follows MoveTo). Pin only on arrival.
-    if dist < 5 then
-      pcall(function() hum:MoveTo(hrp.Position) end)
-      pcall(function()
-        hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(dest.X, hrp.Position.Y, dest.Z))
-      end)
-      tourWaitUntil = now + pause
-      return
-    end
+    -- humanoid's own job (AutoRotate follows MoveTo).
     -- stuck? (3s without progress) hop once and keep going
     if tourLastPos and (hrp.Position - tourLastPos).Magnitude < 1 then
       if now - tourStuckT > 3 then
