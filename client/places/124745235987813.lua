@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.4-sellwait"
+  local MODULE_VERSION = "1.5-moveto"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -397,7 +397,7 @@ return function(api)
       if sh == nil or sh < 1 or now - sellHoldT > 12 then
         sellHold = false
       else
-        pcall(function() hum:Move(hrp.Position) end)
+        pcall(function() hum:MoveTo(hrp.Position) end)
         return
       end
     end
@@ -424,7 +424,7 @@ return function(api)
     end
     if dest == nil then
       tourTarget = nil
-      pcall(function() hum:Move(hrp.Position) end)
+      pcall(function() hum:MoveTo(hrp.Position) end)
       return
     end
     tourTarget = dest
@@ -438,9 +438,11 @@ return function(api)
       tourWaitUntil = now + math.max(pause, 0.3)
       return
     end
-    -- Walk / Noclip: native steps (noclip just holds collisions off)
+    -- Walk / Noclip: PERSISTENT MoveTo (the controller keeps walking
+    -- between our 0.5s ticks). Instant Move() decays in ~0.1s and the
+    -- character mostly stands — that was the freeze.
     if dist < 5 then
-      pcall(function() hum:Move(hrp.Position) end)
+      pcall(function() hum:MoveTo(hrp.Position) end)
       tourWaitUntil = now + pause
       return
     end
@@ -457,7 +459,7 @@ return function(api)
     local dir = dest - hrp.Position
     dir = Vector3.new(dir.X, 0, dir.Z)
     if dir.Magnitude > 0.05 then
-      pcall(function() hum:Move(dir.Unit, false) end)
+      pcall(function() hum:MoveTo(dest) end)
     end
     pcall(function()
       hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(dest.X, hrp.Position.Y, dest.Z))
