@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.2-tour"
+  local MODULE_VERSION = "1.4-sellwait"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -33,7 +33,8 @@ return function(api)
     farm_on = false, farm_rate = 15, farm_mode = "Weakest", farm_range = 80,
     sell_on = false, sell_at = 100, sell_cd = 0,
     gel_on = false, gel_cd = 0,
-    tour_on = false, tour_range = 150,
+    tour_on = false, tour_range = 150, tour_mode = "Walk",
+    tour_speed = 16, tour_pause = 0.5,
     esp_on = false, esp_names = true, esp_range = 400, esp_count = 30,
     esp_col = Color3.fromRGB(120, 220, 255),
   }
@@ -290,6 +291,7 @@ return function(api)
             if (pp - me.Position).Magnitude <= maxD then
               if type(fireproximityprompt) == "function" then
                 F.sell_cd = now
+                sellHold, sellHoldT = true, now
                 pcall(fireproximityprompt, prompt)
                 Notify("Sell", ("Auto-sold %d shards"):format(math.floor(shards)), "ok")
               end
@@ -319,11 +321,47 @@ return function(api)
     end
   end
   -- --------------------------------------------------------------------------
-  -- Loot tour: walk the drops like a player (native Humanoid:MoveTo, no
-  -- teleports), bag-full → walk back to the podium (auto-sell fires there),
-  -- repeat. Yields instantly to your own WASD.
+  -- Loot tour: Walk (legit steps) / Noclip (through walls) / Teleport
+  -- (hops). Bag-full walks home to the podium (auto-sell fires there).
+  -- Your WASD always wins. Risk grows left to right — pick wisely.
   -- --------------------------------------------------------------------------
-  local tourStuckT, tourLastPos, tourTarget = 0, nil, nil
+  local tourStuckT, tourLastPos, tourTarget, tourWaitUntil = 0, nil, nil, 0
+  local tourNc, tourOrigSpeed, tourSpeedSet = {}, nil, false
+  -- sell hold: after auto-sell fires, shards fly out over a few seconds.
+  -- The tour must stand by until the bag is ACTUALLY empty, not just
+  -- below the threshold, otherwise it walks off mid-sale.
+  local sellHold, sellHoldT = false, 0
+  local function tourNoclip(on, ch)
+    if on then
+      if ch then
+        for _, p in ipairs(ch:GetDescendants()) do
+          if p:IsA("BasePart") then
+            if tourNc[p] == nil then tourNc[p] = p.CanCollide end
+            p.CanCollide = false
+          end
+        end
+      end
+    else
+      for p, v in pairs(tourNc) do
+        pcall(function() if p.Parent then p.CanCollide = v end end)
+        tourNc[p] = nil
+      end
+    end
+  end
+  local function tourSpeed(hum, want)
+    if want then
+      if not tourSpeedSet then
+        tourOrigSpeed = hum.WalkSpeed
+        tourSpeedSet = true
+      end
+      local s = clamp(tonumber(F.tour_speed) or 16, 16, 100)
+      if hum.WalkSpeed ~= s then pcall(function() hum.WalkSpeed = s end) end
+    elseif tourSpeedSet then
+      tourSpeedSet = false
+      pcall(function() hum.WalkSpeed = tourOrigSpeed or 16 end)
+      tourOrigSpeed = nil
+    end
+  end
   local function podiumPos()
     local ok, pod = pcall(function()
       local pav = workspace:FindFirstChild("Pavilion")
@@ -335,21 +373,42 @@ return function(api)
     return nil
   end
   local function tourTick()
-    if not F.tour_on then return end
     local ch = myChar()
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not F.tour_on then
+      if hum then tourSpeed(hum, false) end
+      tourNoclip(false)
+      return
+    end
     if not hum or not hrp then return end
+    local mode = F.tour_mode or "Walk"
     -- your hands on WASD override the tour for this tick
     local manual = false
     pcall(function()
       manual = hum.MoveDirection.Magnitude > 0.1
     end)
     if manual then tourTarget = nil; return end
+    local now = os.clock()
+    -- sale in flight: stand by until every shard leaves the bag (or 12s),
+    -- then go for new ones
+    if sellHold then
+      local sh = playerStat("Shards")
+      if sh == nil or sh < 1 or now - sellHoldT > 12 then
+        sellHold = false
+      else
+        pcall(function() hum:Move(hrp.Position) end)
+        return
+      end
+    end
+    tourSpeed(hum, true)
+    tourNoclip(mode == "Noclip", ch)
+    local now = os.clock()
+    if now < tourWaitUntil then return end -- pickup pause: let it register
     local shards, max = playerStat("Shards"), playerStat("MaxShards")
-    local dest = nil
+    local dest, isPodium = nil, false
     if shards and max and max > 0 and shards >= max then
-      dest = podiumPos() -- bag full: walk home, auto-sell fires on arrival
+      dest, isPodium = podiumPos(), true -- bag full: walk home
     else
       local ws = workspace:FindFirstChild("CubeDrops")
       if ws then
@@ -369,8 +428,23 @@ return function(api)
       return
     end
     tourTarget = dest
+    local dist = (dest - hrp.Position).Magnitude
+    local pause = tonumber(F.tour_pause) or 0.5
+    if mode == "Teleport" then
+      -- hop in, pause for the server to register, next
+      pcall(function()
+        hrp.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
+      end)
+      tourWaitUntil = now + math.max(pause, 0.3)
+      return
+    end
+    -- Walk / Noclip: native steps (noclip just holds collisions off)
+    if dist < 5 then
+      pcall(function() hum:Move(hrp.Position) end)
+      tourWaitUntil = now + pause
+      return
+    end
     -- stuck? (3s without progress) hop once and keep going
-    local now = os.clock()
     if tourLastPos and (hrp.Position - tourLastPos).Magnitude < 1 then
       if now - tourStuckT > 3 then
         tourStuckT = now
@@ -380,12 +454,14 @@ return function(api)
       tourLastPos = hrp.Position
       tourStuckT = now
     end
-    -- arrived: drops collect by server proximity, podium sells via auto-sell
-    if (dest - hrp.Position).Magnitude < 5 then
-      pcall(function() hum:Move(hrp.Position) end)
-      return
+    local dir = dest - hrp.Position
+    dir = Vector3.new(dir.X, 0, dir.Z)
+    if dir.Magnitude > 0.05 then
+      pcall(function() hum:Move(dir.Unit, false) end)
     end
-    pcall(function() hum:MoveTo(dest) end)
+    pcall(function()
+      hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(dest.X, hrp.Position.Y, dest.Z))
+    end)
   end
   local statHits, statBroke = 0, 0
   do
@@ -526,6 +602,16 @@ return function(api)
       local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
       if hum and hrp then hum:Move(hrp.Position) end
     end)
+    tourNoclip(false)
+    if tourSpeedSet then
+      tourSpeedSet = false
+      pcall(function()
+        local ch = myChar()
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = tourOrigSpeed or 16 end
+      end)
+      tourOrigSpeed = nil
+    end
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     for _, page in pairs(pages) do page:Destroy() end
     for _, rec in pairs(espMap) do
@@ -594,7 +680,13 @@ return function(api)
   local tourSec = pages.Farm:Section({ Name = "Loot tour" })
   tourSec:Paragraph("Walks the drops like a player (no teleports), bag-full walks home to the podium where auto-sell fires. Your WASD always wins.")
   flagToggle(tourSec, "Loot tour", "tour_on")
+  flagDropdown(tourSec, "Move mode", "tour_mode", { "Walk", "Noclip", "Teleport" })
+  tourSec:Paragraph("Walk = legit steps, slowest, safest. Noclip = through walls (server may yank). Teleport = hops, fastest, riskiest.")
   flagSlider(tourSec, "Tour radius", "tour_range", 50, 500, { suf = "m" })
+  flagSlider(tourSec, "Walk speed", "tour_speed", 16, 100,
+    { tip = "Applies during the tour, restores after" })
+  flagSlider(tourSec, "Pause per pickup", "tour_pause", 0, 3,
+    { dec = 1, suf = "s", tip = "Linger on each drop so the server registers it" })
   local espSec = pages.ESP:Section({ Name = "Parts" })
   espSec:Paragraph("Weakest parts first: labels with HP + unlimited wireframe boxes.")
   flagToggle(espSec, "Part ESP", "esp_on")
