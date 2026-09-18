@@ -13,8 +13,8 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local NovaUI = api.Nova
-  local MODULE_VERSION = "1.6-walkfix"
+  local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hubs)
+  local MODULE_VERSION = "1.8-hud"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -32,7 +32,7 @@ return function(api)
   local F = {
     farm_on = false, farm_rate = 15, farm_mode = "Weakest", farm_range = 80,
     sell_on = false, sell_at = 100, sell_cd = 0,
-    gel_on = false, gel_cd = 0,
+    gel_on = false, gel_cd = 0, gel_every = 120,
     tour_on = false, tour_range = 150, tour_mode = "Walk",
     tour_speed = 16, tour_pause = 0.5,
     esp_on = false, esp_names = true, esp_range = 400, esp_count = 30,
@@ -99,6 +99,9 @@ return function(api)
   end
   local function V2(x, y) return Vector2.new(fin(x), fin(y)) end
   local dbg = { fps = 0, frames = 0, fpsT = 0, err = {}, last = "" }
+  local function hud(key, text)
+    if Hud then pcall(function() Hud(key, text) end) end
+  end
   local function guarded(sec, fn)
     local ok, e = pcall(fn)
     if not ok then
@@ -292,6 +295,8 @@ return function(api)
               if type(fireproximityprompt) == "function" then
                 F.sell_cd = now
                 sellHold, sellHoldT = true, now
+                sellMoney = playerStat("Money") or 0
+                sellMoneyT = now
                 pcall(fireproximityprompt, prompt)
                 Notify("Sell", ("Auto-sold %d shards"):format(math.floor(shards)), "ok")
               end
@@ -306,10 +311,11 @@ return function(api)
         end)
       end
     end
-    -- aqua: free gel top-up, mirrors the water button (UseGel "Aqua")
+    -- aqua: the counter only grows (223 seen), so "below 80" never
+    -- triggers. Mirror the water button periodically instead.
     if F.gel_on then
-      local aqua = playerStat("Gel_Aqua")
-      if aqua and aqua < 80 and now - (F.gel_cd or 0) > 10 then
+      local every = tonumber(F.gel_every) or 120
+      if now - (F.gel_cd or 0) > every then
         local rs = game:GetService("ReplicatedStorage")
         local cr = rs and rs:FindFirstChild("CubeRemotes")
         local ug = cr and cr:FindFirstChild("UseGel")
@@ -327,10 +333,11 @@ return function(api)
   -- --------------------------------------------------------------------------
   local tourStuckT, tourLastPos, tourTarget, tourWaitUntil = 0, nil, nil, 0
   local tourNc, tourOrigSpeed, tourSpeedSet = {}, nil, false
-  -- sell hold: after auto-sell fires, shards fly out over a few seconds.
-  -- The tour must stand by until the bag is ACTUALLY empty, not just
-  -- below the threshold, otherwise it walks off mid-sale.
-  local sellHold, sellHoldT = false, 0
+  -- sale completion is tracked by MONEY movement, not the shard counter:
+  -- the server deducts Shards the instant the sale is accepted while the
+  -- visuals (and the money ticks) still fly for many seconds. Holding on
+  -- shards==0 releases immediately and the tour walks off mid-sale.
+  local sellHold, sellHoldT, sellMoney, sellMoneyT = false, 0, 0, 0
   local function tourNoclip(on, ch)
     if on then
       if ch then
@@ -390,11 +397,12 @@ return function(api)
     end)
     if manual then tourTarget = nil; return end
     local now = os.clock()
-    -- sale in flight: stand by until every shard leaves the bag (or 60s —
-    -- 500 shards fly out longer than 12s), then go for new ones
+    -- sale in flight: stand by until the money STOPS moving (min 5s,
+    -- max 60s), then go for new ones
     if sellHold then
-      local sh = playerStat("Shards")
-      if sh == nil or sh < 1 or now - sellHoldT > 60 then
+      local m = playerStat("Money")
+      if m and m ~= sellMoney then sellMoney, sellMoneyT = m, now end
+      if m == nil or (now - sellMoneyT > 4 and now - sellHoldT > 5) or now - sellHoldT > 60 then
         sellHold = false
       else
         pcall(function() hum:MoveTo(hrp.Position) end)
@@ -566,6 +574,11 @@ return function(api)
         statTick = now
         pcall(function()
           statLbl.Set(("hits %d · broke %d · parts %d"):format(statHits, statBroke, nParts))
+          local s, m, money = playerStat("Shards"), playerStat("MaxShards"), playerStat("Money")
+          if s and m then
+            hud("cube", ("◆ shards %d/%d%s"):format(math.floor(s), math.floor(m),
+              money and (" · $%d"):format(math.floor(money)) or ""))
+          end
           local parts = { ("loop %dfps"):format(dbg.fps) }
           for _, sec in ipairs({ "scan", "farm", "esp" }) do
             if dbg.err[sec] then
@@ -597,6 +610,7 @@ return function(api)
   unloadModule = function()
     if moduleDead then return end
     moduleDead = true
+    hud("cube", nil) -- drop the overlay line
     pcall(function()
       local ch = myChar()
       local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -676,8 +690,9 @@ return function(api)
     sellSec:Paragraph("WARNING: this executor has no fireproximityprompt — auto-sell cannot work here.")
   end
   local gelSec = pages.Farm:Section({ Name = "Auto aqua" })
-  gelSec:Paragraph("Tops up the free water gel (UseGel Aqua), same as the water button.")
+  gelSec:Paragraph("Presses the free water button for you, periodically.")
   flagToggle(gelSec, "Auto aqua", "gel_on")
+  flagSlider(gelSec, "Every", "gel_every", 30, 600, { suf = "s" })
   local tourSec = pages.Farm:Section({ Name = "Loot tour" })
   tourSec:Paragraph("Walks the drops like a player (no teleports), bag-full walks home to the podium where auto-sell fires. Your WASD always wins.")
   flagToggle(tourSec, "Loot tour", "tour_on")
