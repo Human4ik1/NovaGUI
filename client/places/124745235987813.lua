@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hubs)
-  local MODULE_VERSION = "1.8-hud"
+  local MODULE_VERSION = "1.10-rubble"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -170,26 +170,34 @@ return function(api)
     local espRange = tonumber(F.esp_range) or 400
     local best, bestD, bestWeak, bestWeakFrac = nil, math.huge, nil, math.huge
     local esp = {}
-    local kids = cf:GetChildren()
-    for i, part in ipairs(kids) do
-      if moduleDead then return end
-      if i % 800 == 0 then task.wait() end
-      if part:IsA("BasePart") and part.Parent then
-        local d = (part.Position - mp).Magnitude
-        if d == d then
-          if d <= range then
-            if d < bestD then best, bestD = part, d end
-            local hp, mh = partHP(part)
-            if hp and mh then
-              local frac = hp / mh
-              if frac < bestWeakFrac then bestWeak, bestWeakFrac = part, frac end
-            end
-          end
-          if d <= espRange and #esp < 200 then
-            local hp2, mh2 = partHP(part)
-            esp[#esp + 1] = { m = part, pos = part.Position, d = d,
-              hp = hp2, mh = mh2 }
-          end
+    -- main cube + rubble chunks (broken-off parts live in CubeRubble with
+    -- their own HP — the same Hit remote works on them)
+    local function consider(part)
+      if not (part:IsA("BasePart") and part.Parent) then return end
+      local d = (part.Position - mp).Magnitude
+      if d ~= d then return end
+      if d <= range then
+        if d < bestD then best, bestD = part, d end
+        local hp, mh = partHP(part)
+        if hp and mh then
+          local frac = hp / mh
+          if frac < bestWeakFrac then bestWeak, bestWeakFrac = part, frac end
+        end
+      end
+      if d <= espRange and #esp < 200 then
+        local hp2, mh2 = partHP(part)
+        esp[#esp + 1] = { m = part, pos = part.Position, d = d,
+          hp = hp2, mh = mh2 }
+      end
+    end
+    local sources = { cf, workspace:FindFirstChild("CubeRubble") }
+    for _, folder in ipairs(sources) do
+      if folder then
+        local kids = folder:GetChildren()
+        for i, part in ipairs(kids) do
+          if moduleDead then return end
+          if i % 800 == 0 then task.wait() end
+          consider(part)
         end
       end
     end
@@ -333,6 +341,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   local tourStuckT, tourLastPos, tourTarget, tourWaitUntil = 0, nil, nil, 0
   local tourNc, tourOrigSpeed, tourSpeedSet = {}, nil, false
+  local tourStatus = "off"
   -- sale completion is tracked by MONEY movement, not the shard counter:
   -- the server deducts Shards the instant the sale is accepted while the
   -- visuals (and the money ticks) still fly for many seconds. Holding on
@@ -386,16 +395,17 @@ return function(api)
     if not F.tour_on then
       if hum then tourSpeed(hum, false) end
       tourNoclip(false)
+      tourStatus = "off"
       return
     end
-    if not hum or not hrp then return end
+    if not hum or not hrp then tourStatus = "no char"; return end
     local mode = F.tour_mode or "Walk"
     -- your hands on WASD override the tour for this tick
     local manual = false
     pcall(function()
       manual = hum.MoveDirection.Magnitude > 0.1
     end)
-    if manual then tourTarget = nil; return end
+    if manual then tourTarget = nil; tourStatus = "manual"; return end
     local now = os.clock()
     -- sale in flight: stand by until the money STOPS moving (min 5s,
     -- max 60s), then go for new ones
@@ -405,6 +415,7 @@ return function(api)
       if m == nil or (now - sellMoneyT > 4 and now - sellHoldT > 5) or now - sellHoldT > 60 then
         sellHold = false
       else
+        tourStatus = "selling…"
         pcall(function() hum:MoveTo(hrp.Position) end)
         return
       end
@@ -412,15 +423,17 @@ return function(api)
     tourSpeed(hum, true)
     tourNoclip(mode == "Noclip", ch)
     local now = os.clock()
-    if now < tourWaitUntil then return end -- pickup pause: let it register
+    if now < tourWaitUntil then tourStatus = "pause"; return end -- pickup pause
     local shards, max = playerStat("Shards"), playerStat("MaxShards")
     local dest, isPodium = nil, false
     if shards and max and max > 0 and shards >= max then
       dest, isPodium = podiumPos(), true -- bag full: walk home
+      if dest then tourStatus = "→ podium (full)" end
     else
       local ws = workspace:FindFirstChild("CubeDrops")
+      local bestD = tonumber(F.tour_range) or 150
       if ws then
-        local mp, best, bestD = hrp.Position, nil, tonumber(F.tour_range) or 150
+        local mp, best = hrp.Position, nil
         for _, d in ipairs(ws:GetChildren()) do
           if d:IsA("BasePart") and d.Parent then
             local dd = (d.Position - mp).Magnitude
@@ -429,11 +442,23 @@ return function(api)
         end
         dest = best
       end
+      if dest then tourStatus = ("→ drop %dm"):format(math.floor(bestD))
+      else tourStatus = ("idle: nothing ≤%dm"):format(math.floor(tonumber(F.tour_range) or 150)) end
     end
     if dest == nil then
       tourTarget = nil
-      pcall(function() hum:MoveTo(hrp.Position) end)
-      return
+      -- nothing to collect: dump whatever is in the bag, then idle here
+      -- (auto-sell fires on arrival at the podium)
+      local sh = playerStat("Shards")
+      if sh and sh > 0 then
+        dest = podiumPos()
+        if dest then tourStatus = "→ podium (nothing left)" end
+      end
+      if dest == nil then
+        if not isPodium then tourStatus = ("idle: nothing ≤%dm"):format(math.floor(tonumber(F.tour_range) or 150)) end
+        pcall(function() hum:MoveTo(hrp.Position) end)
+        return
+      end
     end
     tourTarget = dest
     local dist = (dest - hrp.Position).Magnitude
@@ -573,11 +598,11 @@ return function(api)
       if statLbl and now - statTick > 2 then
         statTick = now
         pcall(function()
-          statLbl.Set(("hits %d · broke %d · parts %d"):format(statHits, statBroke, nParts))
+          statLbl.Set(("hits %d · broke %d · parts %d · %s"):format(statHits, statBroke, nParts, tourStatus))
           local s, m, money = playerStat("Shards"), playerStat("MaxShards"), playerStat("Money")
           if s and m then
-            hud("cube", ("◆ shards %d/%d%s"):format(math.floor(s), math.floor(m),
-              money and (" · $%d"):format(math.floor(money)) or ""))
+            hud("cube", ("◆ shards %d/%d%s · %s"):format(math.floor(s), math.floor(m),
+              money and (" · $%d"):format(math.floor(money)) or "", tourStatus))
           end
           local parts = { ("loop %dfps"):format(dbg.fps) }
           for _, sec in ipairs({ "scan", "farm", "esp" }) do
@@ -684,7 +709,7 @@ return function(api)
   local sellSec = pages.Farm:Section({ Name = "Auto-sell" })
   sellSec:Paragraph("Sells by itself when the bag fills — but only standing by the podium (its 12m reach). No teleports.")
   flagToggle(sellSec, "Auto-sell", "sell_on")
-  flagSlider(sellSec, "Sell when full at", "sell_at", 50, 100, { suf = "%" })
+  flagSlider(sellSec, "Sell when full at", "sell_at", 1, 100, { suf = "%" })
   sellLbl = sellSec:Label("shards ?/?")
   if type(fireproximityprompt) ~= "function" then
     sellSec:Paragraph("WARNING: this executor has no fireproximityprompt — auto-sell cannot work here.")
