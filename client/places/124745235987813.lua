@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hubs)
-  local MODULE_VERSION = "1.12-arrive"
+  local MODULE_VERSION = "1.14-sellclean"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -285,39 +285,11 @@ return function(api)
   end
   local function autoTick()
     local now = os.clock()
-    -- sell: shards full (or past threshold) + standing by the podium
-    if F.sell_on then
-      local shards, max = playerStat("Shards"), playerStat("MaxShards")
-      if shards and max and max > 0 and shards >= max * (tonumber(F.sell_at) or 100) / 100 then
-        if now - (F.sell_cd or 0) > 5 then
-          local me = myHRP()
-          local prompt, pod = sellPrompt()
-          if prompt and me then
-            local maxD = 12
-            pcall(function()
-              local md = prompt.MaxActivationDistance
-              if type(md) == "number" and md > 0 then maxD = md end
-            end)
-            local pp = pod:IsA("BasePart") and pod.Position or prompt.Parent.Position
-            if (pp - me.Position).Magnitude <= maxD then
-              if type(fireproximityprompt) == "function" then
-                F.sell_cd = now
-                sellHold, sellHoldT = true, now
-                sellMoney = playerStat("Money") or 0
-                sellMoneyT = now
-                pcall(fireproximityprompt, prompt)
-                Notify("Sell", ("Auto-sold %d shards"):format(math.floor(shards)), "ok")
-              end
-            end
-          end
-        end
-      end
-      if sellLbl then
-        pcall(function()
-          local s, m = playerStat("Shards"), playerStat("MaxShards")
-          if s and m then sellLbl.Set(("shards %d/%d"):format(math.floor(s), math.floor(m))) end
-        end)
-      end
+    if F.sell_on and sellLbl then
+      pcall(function()
+        local s, m = playerStat("Shards"), playerStat("MaxShards")
+        if s and m then sellLbl.Set(("shards %d/%d"):format(math.floor(s), math.floor(m))) end
+      end)
     end
     -- aqua: the counter only grows (223 seen), so "below 80" never
     -- triggers. Mirror the water button periodically instead.
@@ -342,11 +314,82 @@ return function(api)
   local tourStuckT, tourLastPos, tourTarget, tourWaitUntil = 0, nil, nil, 0
   local tourNc, tourOrigSpeed, tourSpeedSet = {}, nil, false
   local tourStatus = "off"
-  -- sale completion is tracked by MONEY movement, not the shard counter:
-  -- the server deducts Shards the instant the sale is accepted while the
-  -- visuals (and the money ticks) still fly for many seconds. Holding on
-  -- shards==0 releases immediately and the tour walks off mid-sale.
-  local sellHold, sellHoldT, sellMoney, sellMoneyT = false, 0, 0, 0
+  -- ONE sell function, explicit phases, nothing scattered:
+  --   idle → bag past threshold → go: travel to the podium (per mode)
+  --   → fire: press the prompt once → wait: stand by a fixed settle time
+  --   proportional to the sold amount → idle, cycle continues.
+  -- Money is NEVER read (server credits it with a huge delay — useless).
+  -- Returns true while the sale owns the tick (caller stands by).
+  local sellPhase = "idle"
+  local sellT0, sellHoldFor = 0, 0
+  -- shared stepper: moves per tour_mode, true once within 2m (arrival)
+  local function stepTo(hrp, hum, dest, now)
+    local mode = F.tour_mode or "Walk"
+    local pause = tonumber(F.tour_pause) or 0.5
+    if (dest - hrp.Position).Magnitude < 2 then
+      pcall(function() hum:MoveTo(hrp.Position) end)
+      tourWaitUntil = now + pause
+      return true
+    end
+    if mode == "Teleport" then
+      pcall(function()
+        hrp.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
+      end)
+      tourWaitUntil = now + math.max(pause, 0.3)
+      return false
+    end
+    -- Walk / Noclip: MoveTo ONLY, never CFrame (cancels MoveTo, freezes)
+    if tourLastPos and (hrp.Position - tourLastPos).Magnitude < 1 then
+      if now - tourStuckT > 3 then
+        tourStuckT = now
+        pcall(function() hum.Jump = true end)
+      end
+    else
+      tourLastPos = hrp.Position
+      tourStuckT = now
+    end
+    if (dest - hrp.Position).Magnitude > 0.5 then
+      pcall(function() hum:MoveTo(dest) end)
+    end
+    return false
+  end
+  local function sellCubes(hrp, hum, now)
+    if sellPhase == "idle" then
+      if not F.sell_on then return false end
+      local shards, max = playerStat("Shards"), playerStat("MaxShards")
+      if not (shards and max and max > 0) then return false end
+      if shards < max * (tonumber(F.sell_at) or 100) / 100 then return false end
+      sellPhase = "go"
+    end
+    if sellPhase == "go" then
+      local dest = podiumPos()
+      if not dest then tourStatus = "sell: no podium"; return true end
+      tourStatus = "→ podium (sell)"
+      if stepTo(hrp, hum, dest, now) then
+        local prompt = select(1, sellPrompt())
+        if prompt and type(fireproximityprompt) == "function" then
+          pcall(fireproximityprompt, prompt)
+          -- settle proportional to load: ~25 shards/sec fly out, min 5s
+          local sh = playerStat("Shards") or 0
+          sellHoldFor = clamp(sh / 25, 5, 45)
+          sellT0 = now
+          sellPhase = "wait"
+          Notify("Sell", ("Selling %d…"):format(math.floor(sh)), "info")
+        else
+          tourStatus = "sell: no prompt"
+        end
+      end
+      return true
+    end
+    -- wait: fixed settle, then back to the loop. No money reads, ever.
+    if now - sellT0 > sellHoldFor then
+      sellPhase = "idle"
+      return false
+    end
+    tourStatus = "selling…"
+    pcall(function() hum:MoveTo(hrp.Position) end)
+    return true
+  end
   local function tourNoclip(on, ch)
     if on then
       if ch then
@@ -417,94 +460,44 @@ return function(api)
     end)
     if manual then tourTarget = nil; tourStatus = "manual"; return end
     local now = os.clock()
-    -- sale in flight: stand by until the money STOPS moving (min 5s,
-    -- max 60s), then go for new ones
-    if sellHold then
-      local m = playerStat("Money")
-      if m and m ~= sellMoney then sellMoney, sellMoneyT = m, now end
-      if m == nil or (now - sellMoneyT > 4 and now - sellHoldT > 5) or now - sellHoldT > 60 then
-        sellHold = false
-      else
-        tourStatus = "selling…"
-        pcall(function() hum:MoveTo(hrp.Position) end)
-        return
-      end
-    end
     tourSpeed(hum, true)
     tourNoclip(mode == "Noclip", ch)
-    local now = os.clock()
     if now < tourWaitUntil then tourStatus = "pause"; return end -- pickup pause
-    local shards, max = playerStat("Shards"), playerStat("MaxShards")
-    local dest, isPodium = nil, false
-    if shards and max and max > 0 and shards >= max then
-      dest, isPodium = podiumPos(), true -- bag full: walk home
-      if dest then tourStatus = "→ podium (full)" end
-    else
-      local ws = workspace:FindFirstChild("CubeDrops")
-      local bestD = tonumber(F.tour_range) or 150
-      if ws then
-        local mp, best = hrp.Position, nil
-        for _, d in ipairs(ws:GetChildren()) do
-          if d:IsA("BasePart") and d.Parent then
-            local dd = (d.Position - mp).Magnitude
-            if dd < bestD then best, bestD = d.Position, dd end
-          end
+    -- sale cycle owns the tick while busy (go / fire / wait)
+    if sellCubes(hrp, hum, now) then return end
+    local dest = nil
+    local ws = workspace:FindFirstChild("CubeDrops")
+    local bestD = tonumber(F.tour_range) or 150
+    if ws then
+      local mp, best = hrp.Position, nil
+      for _, d in ipairs(ws:GetChildren()) do
+        if d:IsA("BasePart") and d.Parent then
+          local dd = (d.Position - mp).Magnitude
+          if dd < bestD then best, bestD = d.Position, dd end
         end
-        dest = best
       end
-      if dest then tourStatus = ("→ drop %dm"):format(math.floor(bestD))
-      else tourStatus = ("idle: nothing ≤%dm"):format(math.floor(tonumber(F.tour_range) or 150)) end
+      dest = best
     end
-    if dest == nil then
-      tourTarget = nil
-      -- nothing to collect: dump whatever is in the bag, then idle here
-      -- (auto-sell fires on arrival at the podium)
-      local sh = playerStat("Shards")
-      if sh and sh > 0 then
-        dest = podiumPos()
-        if dest then tourStatus = "→ podium (nothing left)" end
-      end
-      if dest == nil then
-        if not isPodium then tourStatus = ("idle: nothing ≤%dm"):format(math.floor(tonumber(F.tour_range) or 150)) end
-        pcall(function() hum:MoveTo(hrp.Position) end)
+    if dest then
+      tourTarget = dest
+      tourStatus = ("→ drop %dm"):format(math.floor(bestD))
+      stepTo(hrp, hum, dest, now)
+      return
+    end
+    -- nothing to collect: dump whatever is in the bag, then idle here
+    tourTarget = nil
+    local sh = playerStat("Shards")
+    if sh and sh > 0 then
+      local pd = podiumPos()
+      if pd then
+        tourTarget = pd
+        tourStatus = "→ podium (nothing left)"
+        stepTo(hrp, hum, pd, now)
         return
       end
     end
-    tourTarget = dest
-    local dist = (dest - hrp.Position).Magnitude
-    local pause = tonumber(F.tour_pause) or 0.5
-    -- arrived (any mode): the server picks drops up only at ~touch
-    -- distance, so "close enough" is 2m, not 5. Hold, let it register.
-    if dist < 2 then
-      pcall(function() hum:MoveTo(hrp.Position) end)
-      tourWaitUntil = now + pause
-      return
-    end
-    if mode == "Teleport" then
-      -- hop in (only when not arrived — see above), pause, next
-      pcall(function()
-        hrp.CFrame = CFrame.new(dest + Vector3.new(0, 3, 0))
-      end)
-      tourWaitUntil = now + math.max(pause, 0.3)
-      return
-    end
-    -- Walk / Noclip: MoveTo ONLY — never touch HRP CFrame while walking.
-    -- Rewriting CFrame every tick (even rotation-only) cancels the active
-    -- MoveTo, so the character twitches in place forever. Facing is the
-    -- humanoid's own job (AutoRotate follows MoveTo).
-    -- stuck? (3s without progress) hop once and keep going
-    if tourLastPos and (hrp.Position - tourLastPos).Magnitude < 1 then
-      if now - tourStuckT > 3 then
-        tourStuckT = now
-        pcall(function() hum.Jump = true end)
-      end
-    else
-      tourLastPos = hrp.Position
-      tourStuckT = now
-    end
-    if (dest - hrp.Position).Magnitude > 0.5 then
-      pcall(function() hum:MoveTo(dest) end)
-    end
+    tourStatus = ("idle: nothing ≤%dm"):format(math.floor(tonumber(F.tour_range) or 150))
+    pcall(function() hum:MoveTo(hrp.Position) end)
   end
   local statHits, statBroke = 0, 0
   do
@@ -608,10 +601,9 @@ return function(api)
         statTick = now
         pcall(function()
           statLbl.Set(("hits %d · broke %d · parts %d · %s"):format(statHits, statBroke, nParts, tourStatus))
-          local s, m, money = playerStat("Shards"), playerStat("MaxShards"), playerStat("Money")
+          local s, m = playerStat("Shards"), playerStat("MaxShards")
           if s and m then
-            hud("cube", ("◆ shards %d/%d%s · %s"):format(math.floor(s), math.floor(m),
-              money and (" · $%d"):format(math.floor(money)) or "", tourStatus))
+            hud("cube", ("◆ shards %d/%d · %s"):format(math.floor(s), math.floor(m), tourStatus))
           end
           local parts = { ("loop %dfps"):format(dbg.fps) }
           for _, sec in ipairs({ "scan", "farm", "esp" }) do
