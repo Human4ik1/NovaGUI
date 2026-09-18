@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.5-moveto"
+  local MODULE_VERSION = "1.6-walkfix"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -390,11 +390,11 @@ return function(api)
     end)
     if manual then tourTarget = nil; return end
     local now = os.clock()
-    -- sale in flight: stand by until every shard leaves the bag (or 12s),
-    -- then go for new ones
+    -- sale in flight: stand by until every shard leaves the bag (or 60s —
+    -- 500 shards fly out longer than 12s), then go for new ones
     if sellHold then
       local sh = playerStat("Shards")
-      if sh == nil or sh < 1 or now - sellHoldT > 12 then
+      if sh == nil or sh < 1 or now - sellHoldT > 60 then
         sellHold = false
       else
         pcall(function() hum:MoveTo(hrp.Position) end)
@@ -438,11 +438,15 @@ return function(api)
       tourWaitUntil = now + math.max(pause, 0.3)
       return
     end
-    -- Walk / Noclip: PERSISTENT MoveTo (the controller keeps walking
-    -- between our 0.5s ticks). Instant Move() decays in ~0.1s and the
-    -- character mostly stands — that was the freeze.
+    -- Walk / Noclip: MoveTo ONLY — never touch HRP CFrame while walking.
+    -- Rewriting CFrame every tick (even rotation-only) cancels the active
+    -- MoveTo, so the character twitches in place forever. Facing is the
+    -- humanoid's own job (AutoRotate follows MoveTo). Pin only on arrival.
     if dist < 5 then
       pcall(function() hum:MoveTo(hrp.Position) end)
+      pcall(function()
+        hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(dest.X, hrp.Position.Y, dest.Z))
+      end)
       tourWaitUntil = now + pause
       return
     end
@@ -456,14 +460,9 @@ return function(api)
       tourLastPos = hrp.Position
       tourStuckT = now
     end
-    local dir = dest - hrp.Position
-    dir = Vector3.new(dir.X, 0, dir.Z)
-    if dir.Magnitude > 0.05 then
+    if (dest - hrp.Position).Magnitude > 0.5 then
       pcall(function() hum:MoveTo(dest) end)
     end
-    pcall(function()
-      hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(dest.X, hrp.Position.Y, dest.Z))
-    end)
   end
   local statHits, statBroke = 0, 0
   do
