@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local Hud = api.Shared and api.Shared.SetHud -- mini corner chip (may be nil on old hubs)
-  local MODULE_VERSION = "1.11-podprompt"
+  local MODULE_VERSION = "1.12-arrive"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -473,8 +473,9 @@ return function(api)
     tourTarget = dest
     local dist = (dest - hrp.Position).Magnitude
     local pause = tonumber(F.tour_pause) or 0.5
-    -- arrived (any mode): hold, let server register, no more hops
-    if dist < 5 then
+    -- arrived (any mode): the server picks drops up only at ~touch
+    -- distance, so "close enough" is 2m, not 5. Hold, let it register.
+    if dist < 2 then
       pcall(function() hum:MoveTo(hrp.Position) end)
       tourWaitUntil = now + pause
       return
