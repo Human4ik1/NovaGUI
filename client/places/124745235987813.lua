@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.0-cube"
+  local MODULE_VERSION = "1.1-auto"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -31,6 +31,8 @@ return function(api)
 
   local F = {
     farm_on = false, farm_rate = 15, farm_mode = "Weakest", farm_range = 80,
+    sell_on = false, sell_at = 100, sell_cd = 0,
+    gel_on = false, gel_cd = 0,
     esp_on = false, esp_names = true, esp_range = 400, esp_count = 30,
     esp_col = Color3.fromRGB(120, 220, 255),
   }
@@ -249,8 +251,72 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- Stats (passive listeners only — never fired by us)
+  -- Auto-sell (podium prompt, in-range only) + auto aqua (UseGel)
   -- --------------------------------------------------------------------------
+  local sellLbl = nil
+  local function sellPrompt()
+    local ok, pod = pcall(function()
+      local pav = workspace:FindFirstChild("Pavilion")
+      return pav and pav:FindFirstChild("SellPodium") or nil
+    end)
+    if not ok or not pod then return nil end
+    local ok2, pr = pcall(function()
+      return pod:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end)
+    return (ok2 and pr or nil), pod
+  end
+  local function playerStat(name)
+    local ok, v = pcall(function() return LP:GetAttribute(name) end)
+    if ok and type(v) == "number" then return v end
+    return nil
+  end
+  local function autoTick()
+    local now = os.clock()
+    -- sell: shards full (or past threshold) + standing by the podium
+    if F.sell_on then
+      local shards, max = playerStat("Shards"), playerStat("MaxShards")
+      if shards and max and max > 0 and shards >= max * (tonumber(F.sell_at) or 100) / 100 then
+        if now - (F.sell_cd or 0) > 5 then
+          local me = myHRP()
+          local prompt, pod = sellPrompt()
+          if prompt and me then
+            local maxD = 12
+            pcall(function()
+              local md = prompt.MaxActivationDistance
+              if type(md) == "number" and md > 0 then maxD = md end
+            end)
+            local pp = pod:IsA("BasePart") and pod.Position or prompt.Parent.Position
+            if (pp - me.Position).Magnitude <= maxD then
+              if type(fireproximityprompt) == "function" then
+                F.sell_cd = now
+                pcall(fireproximityprompt, prompt)
+                Notify("Sell", ("Auto-sold %d shards"):format(math.floor(shards)), "ok")
+              end
+            end
+          end
+        end
+      end
+      if sellLbl then
+        pcall(function()
+          local s, m = playerStat("Shards"), playerStat("MaxShards")
+          if s and m then sellLbl.Set(("shards %d/%d"):format(math.floor(s), math.floor(m))) end
+        end)
+      end
+    end
+    -- aqua: free gel top-up, mirrors the water button (UseGel "Aqua")
+    if F.gel_on then
+      local aqua = playerStat("Gel_Aqua")
+      if aqua and aqua < 80 and now - (F.gel_cd or 0) > 10 then
+        local rs = game:GetService("ReplicatedStorage")
+        local cr = rs and rs:FindFirstChild("CubeRemotes")
+        local ug = cr and cr:FindFirstChild("UseGel")
+        if ug then
+          F.gel_cd = now
+          pcall(function() ug:FireServer("Aqua") end)
+        end
+      end
+    end
+  end
   local statHits, statBroke = 0, 0
   do
     pcall(function()
@@ -269,7 +335,7 @@ return function(api)
   -- Status
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
-  local statTick, scanTick, fireTick, nParts = 0, 0, 0, 0
+  local statTick, scanTick, fireTick, autoT, nParts = 0, 0, 0, 0, 0
 
   -- --------------------------------------------------------------------------
   -- Main loop (own Hit remote only, paced)
@@ -285,6 +351,7 @@ return function(api)
         dbg.frames, dbg.fpsT = 0, now
       end
       if now - scanTick > 0.5 then scanTick = now; guarded("scan", scanTargets) end
+      if now - autoT > 1 then autoT = now; guarded("auto", autoTick) end
       local me = myChar()
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
@@ -454,6 +521,17 @@ return function(api)
   flagSlider(farmSec, "Hits per second", "farm_rate", 1, 60,
     { tip = "The reference spams ~60/s. Lower is quieter." })
   flagSlider(farmSec, "Target range", "farm_range", 10, 1000, { suf = "m" })
+  local sellSec = pages.Farm:Section({ Name = "Auto-sell" })
+  sellSec:Paragraph("Sells by itself when the bag fills — but only standing by the podium (its 12m reach). No teleports.")
+  flagToggle(sellSec, "Auto-sell", "sell_on")
+  flagSlider(sellSec, "Sell when full at", "sell_at", 50, 100, { suf = "%" })
+  sellLbl = sellSec:Label("shards ?/?")
+  if type(fireproximityprompt) ~= "function" then
+    sellSec:Paragraph("WARNING: this executor has no fireproximityprompt — auto-sell cannot work here.")
+  end
+  local gelSec = pages.Farm:Section({ Name = "Auto aqua" })
+  gelSec:Paragraph("Tops up the free water gel (UseGel Aqua), same as the water button.")
+  flagToggle(gelSec, "Auto aqua", "gel_on")
   local espSec = pages.ESP:Section({ Name = "Parts" })
   espSec:Paragraph("Weakest parts first: labels with HP + unlimited wireframe boxes.")
   flagToggle(espSec, "Part ESP", "esp_on")
