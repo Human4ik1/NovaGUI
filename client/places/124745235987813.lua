@@ -14,7 +14,7 @@
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
   local NovaUI = api.Nova
-  local MODULE_VERSION = "1.1-auto"
+  local MODULE_VERSION = "1.2-tour"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -33,6 +33,7 @@ return function(api)
     farm_on = false, farm_rate = 15, farm_mode = "Weakest", farm_range = 80,
     sell_on = false, sell_at = 100, sell_cd = 0,
     gel_on = false, gel_cd = 0,
+    tour_on = false, tour_range = 150,
     esp_on = false, esp_names = true, esp_range = 400, esp_count = 30,
     esp_col = Color3.fromRGB(120, 220, 255),
   }
@@ -317,6 +318,75 @@ return function(api)
       end
     end
   end
+  -- --------------------------------------------------------------------------
+  -- Loot tour: walk the drops like a player (native Humanoid:MoveTo, no
+  -- teleports), bag-full → walk back to the podium (auto-sell fires there),
+  -- repeat. Yields instantly to your own WASD.
+  -- --------------------------------------------------------------------------
+  local tourStuckT, tourLastPos, tourTarget = 0, nil, nil
+  local function podiumPos()
+    local ok, pod = pcall(function()
+      local pav = workspace:FindFirstChild("Pavilion")
+      return pav and pav:FindFirstChild("SellPodium") or nil
+    end)
+    if not ok or not pod then return nil end
+    local ok2, cf = pcall(function() return pod:GetBoundingBox() end)
+    if ok2 and cf then return cf.Position end
+    return nil
+  end
+  local function tourTick()
+    if not F.tour_on then return end
+    local ch = myChar()
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return end
+    -- your hands on WASD override the tour for this tick
+    local manual = false
+    pcall(function()
+      manual = hum.MoveDirection.Magnitude > 0.1
+    end)
+    if manual then tourTarget = nil; return end
+    local shards, max = playerStat("Shards"), playerStat("MaxShards")
+    local dest = nil
+    if shards and max and max > 0 and shards >= max then
+      dest = podiumPos() -- bag full: walk home, auto-sell fires on arrival
+    else
+      local ws = workspace:FindFirstChild("CubeDrops")
+      if ws then
+        local mp, best, bestD = hrp.Position, nil, tonumber(F.tour_range) or 150
+        for _, d in ipairs(ws:GetChildren()) do
+          if d:IsA("BasePart") and d.Parent then
+            local dd = (d.Position - mp).Magnitude
+            if dd < bestD then best, bestD = d.Position, dd end
+          end
+        end
+        dest = best
+      end
+    end
+    if dest == nil then
+      tourTarget = nil
+      pcall(function() hum:Move(hrp.Position) end)
+      return
+    end
+    tourTarget = dest
+    -- stuck? (3s without progress) hop once and keep going
+    local now = os.clock()
+    if tourLastPos and (hrp.Position - tourLastPos).Magnitude < 1 then
+      if now - tourStuckT > 3 then
+        tourStuckT = now
+        pcall(function() hum.Jump = true end)
+      end
+    else
+      tourLastPos = hrp.Position
+      tourStuckT = now
+    end
+    -- arrived: drops collect by server proximity, podium sells via auto-sell
+    if (dest - hrp.Position).Magnitude < 5 then
+      pcall(function() hum:Move(hrp.Position) end)
+      return
+    end
+    pcall(function() hum:MoveTo(dest) end)
+  end
   local statHits, statBroke = 0, 0
   do
     pcall(function()
@@ -335,7 +405,7 @@ return function(api)
   -- Status
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl
-  local statTick, scanTick, fireTick, autoT, nParts = 0, 0, 0, 0, 0
+  local statTick, scanTick, fireTick, autoT, tourT, nParts = 0, 0, 0, 0, 0, 0
 
   -- --------------------------------------------------------------------------
   -- Main loop (own Hit remote only, paced)
@@ -352,6 +422,7 @@ return function(api)
       end
       if now - scanTick > 0.5 then scanTick = now; guarded("scan", scanTargets) end
       if now - autoT > 1 then autoT = now; guarded("auto", autoTick) end
+      if now - tourT > 0.5 then tourT = now; guarded("tour", tourTick) end
       local me = myChar()
       local meHRP = me and me:FindFirstChild("HumanoidRootPart")
       local vs = camera.ViewportSize
@@ -449,24 +520,12 @@ return function(api)
   unloadModule = function()
     if moduleDead then return end
     moduleDead = true
-    for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
-    for _, page in pairs(pages) do page:Destroy() end
-    for _, rec in pairs(espMap) do
-      if rec.lbl then pcall(function() rec.lbl:Remove() end) end
-      if rec.box then pcall(function() rec.box:Destroy() end) end
-    end
-    for k in pairs(espMap) do espMap[k] = nil end
-    local g = getgenv and getgenv()
-    if g then
-      if g.__HUMA_PLACE and g.__HUMA_PLACE.Unload == unloadModule then g.__HUMA_PLACE = nil end
-    end
-    Notify("Cube", "Module unloaded", "info")
-  end
-
-  local pages = {}
-  unloadModule = function()
-    if moduleDead then return end
-    moduleDead = true
+    pcall(function()
+      local ch = myChar()
+      local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+      local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+      if hum and hrp then hum:Move(hrp.Position) end
+    end)
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     for _, page in pairs(pages) do page:Destroy() end
     for _, rec in pairs(espMap) do
@@ -532,6 +591,10 @@ return function(api)
   local gelSec = pages.Farm:Section({ Name = "Auto aqua" })
   gelSec:Paragraph("Tops up the free water gel (UseGel Aqua), same as the water button.")
   flagToggle(gelSec, "Auto aqua", "gel_on")
+  local tourSec = pages.Farm:Section({ Name = "Loot tour" })
+  tourSec:Paragraph("Walks the drops like a player (no teleports), bag-full walks home to the podium where auto-sell fires. Your WASD always wins.")
+  flagToggle(tourSec, "Loot tour", "tour_on")
+  flagSlider(tourSec, "Tour radius", "tour_range", 50, 500, { suf = "m" })
   local espSec = pages.ESP:Section({ Name = "Parts" })
   espSec:Paragraph("Weakest parts first: labels with HP + unlimited wireframe boxes.")
   flagToggle(espSec, "Part ESP", "esp_on")
