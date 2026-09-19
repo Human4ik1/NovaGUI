@@ -13,7 +13,8 @@
       noclip/fly (gradual movement, no position snaps);
     - the custom menu is replaced by Nova controls in Delta layout:
       Navigation → Pages (ESP/Aim/World/Safety/About) → SubTabs;
-    - keybind bars live inside their feature sections (Aim/Fire/Move);
+    - every function key lives on the same line as its toggle (key box + T/H),
+      no fixed X/B/N/M hotkeys;
     - persistence now rides Nova:Save/Load (Flag = engine key), the JSON
       file is gone; waypoints stay session-only.
 
@@ -28,7 +29,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "3.0-antitp"
+  local MODULE_VERSION = "3.1-binds"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -75,11 +76,32 @@ return function(api)
     local k = keyCache[name]
     if k == nil then
       local ok, kc = pcall(function() return Enum.KeyCode[name] end)
-      k = ok and kc or false
+      if (not ok) or kc == nil then -- mouse buttons live on UserInputType
+        local ok2, ut = pcall(function() return Enum.UserInputType[name] end)
+        kc = (ok2 and ut) or false
+      end
+      k = kc
       keyCache[name] = k
     end
     if k == false then return nil end
     return k
+  end
+  local function bindDown(kc) -- pressed state for KeyCode + mouse buttons
+    if not kc then return false end
+    local okT, et = pcall(function() return kc.EnumType end)
+    if okT and et == Enum.UserInputType then
+      if kc == Enum.UserInputType.MouseButton1 then
+        return userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+      end
+      if kc == Enum.UserInputType.MouseButton2 then
+        return userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+      end
+      if kc == Enum.UserInputType.MouseButton3 then
+        return userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton3)
+      end
+      return false
+    end
+    return userInput:IsKeyDown(kc)
   end
   local function notify(msg)
     pcall(function() Notify("Cold War", tostring(msg), "info") end)
@@ -1076,17 +1098,154 @@ return function(api)
       Flag = "cw_" .. key, Tooltip = tip,
       Callback = function(v) M.flags[key] = tostring(v) end })
   end
-  local function bindRow(sec, action)
-    -- key capture (Nova control) + toggle/hold mode (engine dispatcher stays)
+  -- Combo row: the bind lives on ONE line with its function. Nova has no
+  -- inline toggle+keybind API, so the key box + T/H mode button are parented
+  -- into the toggle's own row. No fixed X/B/N/M hotkeys anymore — every
+  -- function key is rebound here (click box, press key; Esc cancels,
+  -- Backspace clears; T/H flips toggle/hold).
+  local NovaUI = api.Nova
+  local function themeColor(key, fb)
+    local ok, v = pcall(function() return NovaUI.Theme[key] end)
+    if ok and typeof(v) == "Color3" then return v end
+    return fb
+  end
+  local function seedBindFlags() -- restore custom keys from the hub profile
+    local live = (NovaUI and NovaUI.Flags) or {}
+    local saved = (NovaUI and NovaUI._loaded) or {}
+    for _, a in ipairs({ "aim", "rage", "autofire", "noclip", "fly", "zoom" }) do
+      local def = M.bindDefs[a]
+      if def then
+        local v = live["cw_" .. def.keyflag]
+        if type(v) ~= "string" then v = saved["cw_" .. def.keyflag] end
+        if type(v) == "string" and v ~= "" then M.flags[def.keyflag] = v end
+        local m = live["cw_" .. def.modflag]
+        if m ~= "toggle" and m ~= "hold" then m = saved["cw_" .. def.modflag] end
+        if m == "toggle" or m == "hold" then M.flags[def.modflag] = m end
+      end
+    end
+  end
+  seedBindFlags()
+  local function bindCombo(toggleHandle, action, keep)
     local def = M.bindDefs[action]
-    sec:Keybind({ Name = def.label .. " key", Default = keyOf(M.flags[def.keyflag]),
-      Tooltip = "Click, then press a key (Esc cancels, Backspace clears)",
-      Callback = function(v)
-        M.flags[def.keyflag] = (v and v.Name) or "none"
-      end })
-    sec:Segmented({ Name = def.label .. " mode", Options = { "toggle", "hold" },
-      Default = M.flags[def.modflag] or "toggle",
-      Callback = function(v) M.flags[def.modflag] = tostring(v) end })
+    local row = toggleHandle and toggleHandle.Instance
+    if not def or not row then return end
+    local keyflag, modflag = def.keyflag, def.modflag
+    keep = keep or {} -- callers pass {{key, h}} pairs whose flags the row click may flip
+    local function persistKey(name)
+      M.flags[keyflag] = name
+      pcall(function() NovaUI.Flags["cw_" .. keyflag] = name end)
+    end
+    local function persistMode(mode)
+      M.flags[modflag] = mode
+      pcall(function() NovaUI.Flags["cw_" .. modflag] = mode end)
+    end
+    local function keyName()
+      local k = keyOf(M.flags[keyflag])
+      if not k then return "—" end
+      local ok, n = pcall(function() return k.Name end)
+      if not ok then return "?" end
+      if n == "MouseButton2" then return "RMB" end
+      if n == "MouseButton3" then return "MMB" end
+      return tostring(n):sub(1, 9)
+    end
+    local box = Instance.new("TextButton")
+    box.Name = "BindBox"
+    box.Text = ""
+    box.AutoButtonColor = false
+    box.BorderSizePixel = 0
+    box.BackgroundColor3 = themeColor("Surface", Color3.fromRGB(30, 32, 42))
+    box.AnchorPoint = Vector2.new(1, 0.5)
+    box.Position = UDim2.new(1, -84, 0.5, 0)
+    box.Size = UDim2.fromOffset(58, 24)
+    box.Font = Enum.Font.GothamMedium
+    box.TextSize = 11
+    box.TextColor3 = themeColor("Sub", Color3.fromRGB(150, 160, 180))
+    box.ZIndex = 2
+    box.Parent = row
+    local bc = Instance.new("UICorner")
+    bc.CornerRadius = UDim.new(0, 6)
+    bc.Parent = box
+    local modeBtn = Instance.new("TextButton")
+    modeBtn.Name = "BindMode"
+    modeBtn.Text = "T"
+    modeBtn.AutoButtonColor = false
+    modeBtn.BorderSizePixel = 0
+    modeBtn.BackgroundColor3 = themeColor("Surface", Color3.fromRGB(30, 32, 42))
+    modeBtn.AnchorPoint = Vector2.new(1, 0.5)
+    modeBtn.Position = UDim2.new(1, -58, 0.5, 0)
+    modeBtn.Size = UDim2.fromOffset(22, 24)
+    modeBtn.Font = Enum.Font.GothamMedium
+    modeBtn.TextSize = 11
+    modeBtn.TextColor3 = themeColor("Sub", Color3.fromRGB(150, 160, 180))
+    modeBtn.ZIndex = 2
+    modeBtn.Parent = row
+    local mc = Instance.new("UICorner")
+    mc.CornerRadius = UDim.new(0, 6)
+    mc.Parent = modeBtn
+    -- Clicking our buttons also clicks the parent toggle row (bubbling) and
+    -- would flip the function. Snapshot on press-down, restore on click.
+    local snap = nil
+    local function snapshot()
+      snap = {}
+      for _, e in ipairs(keep) do snap[e.key] = M.flags[e.key] end
+    end
+    local function restoreRow()
+      if not snap then return end
+      for _, e in ipairs(keep) do
+        e.h.Set(snap[e.key] == true, true)
+        M.flags[e.key] = snap[e.key]
+      end
+      snap = nil
+    end
+    local listening = false
+    local function refresh()
+      box.Text = listening and "…" or keyName()
+      modeBtn.Text = (M.flags[modflag] == "hold") and "H" or "T"
+    end
+    box.InputBegan:Connect(function(inp)
+      if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+        snapshot()
+      end
+    end)
+    box.MouseButton1Click:Connect(function()
+      restoreRow()
+      listening = true
+      refresh()
+    end)
+    modeBtn.InputBegan:Connect(function(inp)
+      if inp.UserInputType == Enum.UserInputType.MouseButton1
+        or inp.UserInputType == Enum.UserInputType.Touch then
+        snapshot()
+      end
+    end)
+    modeBtn.MouseButton1Click:Connect(function()
+      restoreRow()
+      persistMode((M.flags[modflag] == "hold") and "toggle" or "hold")
+      refresh()
+    end)
+    regConn(userInput.InputBegan:Connect(function(inp)
+      if not listening then return end
+      if inp.UserInputType == Enum.UserInputType.Keyboard then
+        local k = inp.KeyCode
+        if k == Enum.KeyCode.Escape then
+          listening = false
+        elseif k == Enum.KeyCode.Backspace or k == Enum.KeyCode.Delete then
+          listening = false
+          persistKey("none")
+        else
+          listening = false
+          persistKey(k.Name)
+        end
+        refresh()
+      elseif inp.UserInputType == Enum.UserInputType.MouseButton2
+        or inp.UserInputType == Enum.UserInputType.MouseButton3 then
+        listening = false
+        persistKey(inp.UserInputType.Name)
+        refresh()
+      end
+    end))
+    refresh()
   end
 
   -- --------------------------------------------------------------------------
@@ -1112,9 +1271,10 @@ return function(api)
 
   -- AIM --
   local aimSec = aimTabs.Aim:Section({ Name = "Aim" })
-  aimSec:Paragraph("Camera aimbot. The Aim lock key bar is right below in this section.")
-  aimSec:Toggle({ Name = "Aimbot", Default = M.flags.aim_enabled == true, Flag = "cw_aim_enabled",
+  aimSec:Paragraph("Camera aimbot. The key box on the Aimbot line is its on/off key.")
+  local aimToggle = aimSec:Toggle({ Name = "Aimbot", Default = M.flags.aim_enabled == true, Flag = "cw_aim_enabled",
     Callback = function(v) M.flags.aim_enabled = v == true end })
+  bindCombo(aimToggle, "aim", { { key = "aim_enabled", h = aimToggle } })
   flagDropdown(aimSec, "Aim part", "aim_part", { "head", "neck", "body" })
   flagSlider(aimSec, "FOV deg", "aim_fov", 5, 60)
   flagSlider(aimSec, "Smoothness", "aim_smooth", 1, 100)
@@ -1130,17 +1290,16 @@ return function(api)
   flagToggle(aimSec, "Aim neutrals", "aim_all")
   flagToggle(aimSec, "FOV circle", "aim_fov_circle")
   flagToggle(aimSec, "Pause while hub open", "aim_pause_menu")
-  bindRow(aimSec, "aim")
 
   -- FIRE --
   local fireSec = aimTabs.Fire:Section({ Name = "Fire" })
-  fireSec:Paragraph("Rage locks everything on screen and fires (fixed X, or your own key below). Needs an equipped firearm.")
-  rageToggle = fireSec:Toggle({ Name = "Rage aim (X)", Default = M.flags.aim_rage == true, Flag = "cw_aim_rage",
+  fireSec:Paragraph("Rage locks everything on screen and fires. Each line carries its own key box. Needs an equipped firearm.")
+  rageToggle = fireSec:Toggle({ Name = "Rage aim", Default = M.flags.aim_rage == true, Flag = "cw_aim_rage",
     Callback = function(v)
       if v and legitGuard() then if rageToggle then rageToggle.Set(false) end return end
       M.flags.aim_rage = v == true
     end })
-  autoToggle = fireSec:Toggle({ Name = "Auto fire (B)", Default = M.flags.aim_autofire == true, Flag = "cw_aim_autofire",
+  autoToggle = fireSec:Toggle({ Name = "Auto fire", Default = M.flags.aim_autofire == true, Flag = "cw_aim_autofire",
     Callback = function(v)
       if v and legitGuard() then if autoToggle then autoToggle.Set(false) end return end
       M.flags.aim_autofire = v == true
@@ -1149,9 +1308,9 @@ return function(api)
     Callback = function(v) M.flags.aim_fastzoom = v == true end })
   flagSlider(fireSec, "Fire rate", "aim_fire_rate", 5, 30, { suf = "/s" })
   flagSlider(fireSec, "Zoom FOV", "aim_zoom_fov", 5, 50)
-  bindRow(fireSec, "rage")
-  bindRow(fireSec, "autofire")
-  bindRow(fireSec, "zoom")
+  bindCombo(rageToggle, "rage", { { key = "aim_rage", h = rageToggle } })
+  bindCombo(autoToggle, "autofire", { { key = "aim_autofire", h = autoToggle } })
+  bindCombo(zoomToggle, "zoom", { { key = "aim_fastzoom", h = zoomToggle } })
 
   -- ESP --
   local espSec = espTabs.Players:Section({ Name = "ESP" })
@@ -1181,14 +1340,14 @@ return function(api)
 
   -- MOVE --
   local moveSec = worldTabs.Move:Section({ Name = "Move" })
-  noclipToggle = moveSec:Toggle({ Name = "Noclip (N)", Desc = "Walls, no fall",
+  noclipToggle = moveSec:Toggle({ Name = "Noclip", Desc = "Walls, no fall",
     Default = M.flags.misc_noclip == true, Flag = "cw_misc_noclip",
     Callback = function(v)
       if v and legitGuard() then if noclipToggle then noclipToggle.Set(false) end return end
       M.flags.misc_noclip = v == true
       if v and M.flags.misc_fly then M.flags.misc_fly = false; if flyToggle then flyToggle.Set(false) end end
     end })
-  flyToggle = moveSec:Toggle({ Name = "Fly (M)", Desc = "WASD + Space up / Shift down",
+  flyToggle = moveSec:Toggle({ Name = "Fly", Desc = "WASD + Space up / Shift down",
     Default = M.flags.misc_fly == true, Flag = "cw_misc_fly",
     Callback = function(v)
       if v and legitGuard() then if flyToggle then flyToggle.Set(false) end return end
@@ -1196,8 +1355,8 @@ return function(api)
       if v and M.flags.misc_noclip then M.flags.misc_noclip = false; if noclipToggle then noclipToggle.Set(false) end end
     end })
   flagSlider(moveSec, "Fly speed", "fly_speed", 10, 200, { suf = " st/s" })
-  bindRow(moveSec, "noclip")
-  bindRow(moveSec, "fly")
+  bindCombo(noclipToggle, "noclip", { { key = "misc_noclip", h = noclipToggle }, { key = "misc_fly", h = flyToggle } })
+  bindCombo(flyToggle, "fly", { { key = "misc_fly", h = flyToggle }, { key = "misc_noclip", h = noclipToggle } })
 
   -- WORLD --
   local worldSec = worldTabs.Visuals:Section({ Name = "World" })
@@ -1366,7 +1525,7 @@ return function(api)
 
   -- MOUSE (keybinds live next to their features now) --
   local mouseSec = pages.Safety:Section({ Name = "Mouse" })
-  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move). Fixed: Alt/Ctrl mouse · P save mark · X rage · B autofire · N/M noclip/fly. Setting a custom key bar disables the fixed key for that action.")
+  mouseSec:Paragraph("Every function key lives on the same line as its toggle: click the key box, press a key (Esc cancels, Backspace clears); T/H flips toggle/hold. Fixed keys left: Alt/Ctrl frees the mouse · P saves a mark.")
   mouseSec:Toggle({ Name = "Free mouse (Alt)", Desc = "Release cursor for the hub window",
     Default = false, Callback = function(v)
       M.uiState.mouseFree = v == true
@@ -1388,8 +1547,6 @@ return function(api)
   -- --------------------------------------------------------------------------
   local function initKeys()
     local lastAlt, lastCtrl, lastP = 0, 0, 0
-    local lastX, lastB = 0, 0
-    local lastN, lastM = 0, 0
 
     regConn(runService.Heartbeat:Connect(function()
       -- whole-body guard: uncaught per-frame errors are observable noise
@@ -1424,62 +1581,14 @@ return function(api)
             notify("Mark saved")
           end
         end
-        -- fixed X/B/N/M yield to a custom key bar on the same action (else double-toggle)
-        if (M.flags.bind_rage_key == nil or M.flags.bind_rage_key == "none")
-          and userInput:IsKeyDown(Enum.KeyCode.X) and (t - lastX) > 0.3 then
-          lastX = t
-          if not M.flags.aim_rage and legitGuard() then
-            if rageToggle then rageToggle.Set(false) end
-          else
-            M.flags.aim_rage = not M.flags.aim_rage
-            if rageToggle then rageToggle.Set(M.flags.aim_rage) end
-            notify(M.flags.aim_rage and "Rage ON" or "Rage OFF")
-          end
-        end
-        if (M.flags.bind_autofire_key == nil or M.flags.bind_autofire_key == "none")
-          and userInput:IsKeyDown(Enum.KeyCode.B) and (t - lastB) > 0.3 then
-          lastB = t
-          if not M.flags.aim_autofire and legitGuard() then
-            if autoToggle then autoToggle.Set(false) end
-          else
-            M.flags.aim_autofire = not M.flags.aim_autofire
-            if autoToggle then autoToggle.Set(M.flags.aim_autofire) end
-            notify(M.flags.aim_autofire and "AutoFire ON" or "AutoFire OFF")
-          end
-        end
-        if (M.flags.bind_noclip_key == nil or M.flags.bind_noclip_key == "none")
-          and userInput:IsKeyDown(Enum.KeyCode.N) and (t - lastN) > 0.3 then
-          lastN = t
-          if not M.flags.misc_noclip and legitGuard() then
-            if noclipToggle then noclipToggle.Set(false) end
-          else
-            M.flags.misc_noclip = not M.flags.misc_noclip
-            if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_fly = false end
-            if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
-            if flyToggle then flyToggle.Set(M.flags.misc_fly) end
-            notify(M.flags.misc_noclip and "Noclip ON" or "Noclip OFF")
-          end
-        end
-        if (M.flags.bind_fly_key == nil or M.flags.bind_fly_key == "none")
-          and userInput:IsKeyDown(Enum.KeyCode.M) and (t - lastM) > 0.3 then
-          lastM = t
-          if not M.flags.misc_fly and legitGuard() then
-            if flyToggle then flyToggle.Set(false) end
-          else
-            M.flags.misc_fly = not M.flags.misc_fly
-            if M.flags.misc_fly and M.flags.misc_noclip then M.flags.misc_noclip = false end
-            if flyToggle then flyToggle.Set(M.flags.misc_fly) end
-            if noclipToggle then noclipToggle.Set(M.flags.misc_noclip) end
-            notify(M.flags.misc_fly and "Fly ON (WASD + space)" or "Fly OFF")
-          end
-        end
+        -- fixed X/B/N/M are gone: every function key lives on its toggle line
       end
 
       -- keybind dispatcher: hold = live key state, toggle = edge flip
       for action, def in pairs(M.bindDefs) do
         local kc = keyOf(M.flags[def.keyflag])
         if kc then
-          local down = userInput:IsKeyDown(kc)
+          local down = bindDown(kc)
           local prevDown = M.binds.prev[action]
           M.binds.prev[action] = down
           local mode = M.flags[def.modflag] or "toggle"
