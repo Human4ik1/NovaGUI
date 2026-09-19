@@ -1880,6 +1880,18 @@ function Nova:Window(opts)
       function sec:Color(o) return control(addColor, o) end
       function sec:TextBox(o) return control(addTextBox, o) end
       function sec:Progress(o) return addProgress(inner, o or {}) end
+      function sec:Custom(o)
+        -- Raw embed: caller builds whatever UI it needs inside a fixed-
+        -- height holder (e.g. a thumbnail grid). No Flag/config support.
+        o = o or {}
+        local holder = New("Frame", { BackgroundTransparency = 1,
+          Size = UDim2.new(1, 0, 0, o.Height or 200) }, inner)
+        if type(o.Build) == "function" then
+          local ok, err = pcall(o.Build, holder)
+          if not ok then warn("[NovaUI] custom: " .. tostring(err)) end
+        end
+        return { Instance = holder }
+      end
       function sec:SetCollapsed(v) setCollapsed(v == true) end
       function sec:IsCollapsed() return collapsed end
       if sopt.Collapsed then task.defer(function() sec:SetCollapsed(true) end) end
