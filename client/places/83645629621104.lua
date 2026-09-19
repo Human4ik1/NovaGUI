@@ -25,7 +25,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local MODULE_VERSION = "3.0-rework"
+  local MODULE_VERSION = "3.1-rework"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
