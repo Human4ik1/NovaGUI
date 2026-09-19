@@ -2,21 +2,30 @@
   HumaHub place module — Forsaken (PlaceId 83645629621104).
   Repo path: client/places/83645629621104.lua
 
-  Engineered from the open FORSAKICH script + our overlay stack.
-  Place facts (verified live):
+  Place facts (verified live + wiki):
     - killer = any character with Humanoid MaxHealth > 250 (live: 2750);
+      team folders Workspace.Players.Killers/Survivors when present;
     - survivors ~80-110hp, R6, characters under Workspace (pl.Character works);
     - generators: Workspace.Map.Ingame.Map children (Model) with
-      Remotes/RF (RemoteFunction) + Remotes/RE (RemoteEvent);
-    - items: Medkit / BloxyCola under Map + workspace models with ItemRoot.
-  Eyes-only except Fix (which calls the game's own repair remote, same as
-  pressing the prompt key — the reference script does the same).
+      Remotes/RF (RemoteFunction) + Remotes/RE (RemoteEvent), NumberValue
+      Progress; Noli rounds add 2 FAKE gens (total 7, fakes give
+      Hallucination instead of progress);
+    - items: Medkit / BloxyCola under Map + workspace models with ItemRoot;
+    - Taph: Tripwire + Subspace Tripmine (19m trigger); Azure: Seeker Bulb +
+      Stigmatize Vines; Veeronica: wall Graffiti; Two-Time: Ritual point;
+      Builderman: BuildermanSentry / BuildermanDispenser / SubspaceTripmine;
+    - stamina: ReplicatedStorage.Systems.Character.Game.Sprinting table
+      (StaminaLoss / StaminaLossDisabled verified; max/speed/regen applied
+      only when those fields exist — names differ per patch).
+  Eyes-only except: stamina table edits, client collision/touch flags,
+  camera aim, GenFix prompt firing (same as pressing the key yourself).
+  GenFix automation can still trip the server (267) — it defaults OFF and
+  says so in the UI.
 ]]
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
-  local NovaUI = api.Nova
-  local MODULE_VERSION = "2.5-pace"
+  local MODULE_VERSION = "3.0-rework"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -33,23 +42,50 @@ return function(api)
   end
 
   local F = {
+    -- Visual / Players
     esp_killer = false, esp_surv = false,
     esp_box = false, esp_health = false, esp_name = false, esp_dist = false,
     esp_thick = 2, esp_range = 4000,
     esp_killercol = Color3.fromRGB(220, 20, 60),
     esp_survcol = Color3.fromRGB(138, 43, 226),
     alert_on = false, alert_range = 200,
-    flow_on = false, flow_node = 0.05, flow_line = 0.5, stam_on = false,
-    build_col = Color3.fromRGB(255, 80, 0),
     glow_killer = false, glow_surv = false, glow_top = true,
     glow_killercol = Color3.fromRGB(220, 20, 60),
     glow_survcol = Color3.fromRGB(138, 43, 226),
+    -- Visual / Items
     item_on = false, item_names = true, item_range = 2500,
     item_col = Color3.fromRGB(0, 255, 0),
     gen_on = false, gen_names = true, gen_range = 4000,
     gen_col = Color3.fromRGB(255, 165, 0),
-    fix_key = Enum.KeyCode.B,
-    aura_on = false, aura_range = 30, aura_rate = 5,
+    -- Visual / Other (per-kind ESP + colors)
+    o_graffiti = false, o_graffiti_col = Color3.fromRGB(255, 0, 255),
+    o_taph = false, o_taph_col = Color3.fromRGB(255, 255, 0),
+    o_azure = false, o_azure_col = Color3.fromRGB(0, 255, 255),
+    azure_radius = 19, azure_radius_on = false,
+    o_ritual = false, o_ritual_col = Color3.fromRGB(255, 255, 255),
+    o_build = false, o_build_col = Color3.fromRGB(255, 80, 0),
+    o_fake = false, o_fake_col = Color3.fromRGB(120, 0, 200),
+    fake_realcount = 5,
+    -- Stamina (per role; same sprint table underneath)
+    stam_surv_on = false, stam_surv_max = 100, stam_surv_speed = 0,
+    stam_surv_regen = 0,
+    stam_killer_on = false, stam_killer_max = 100, stam_killer_speed = 0,
+    stam_killer_regen = 0,
+    -- GenFix (flow solver kept from previous version)
+    flow_on = false, flow_node = 0.05, flow_line = 0.5,
+    genfix_on = false, genfix_key = nil, genfix_mode = "Random",
+    genfix_custom = "—", genfix_rate = 1.0, genfix_hideui = false,
+    -- Antis / Movement
+    anti_slow = false, anti_stun = false, anti_root = false,
+    -- Antis / Debuffs
+    deb_gui = false, deb_post = false,
+    -- Antis / Exploits
+    x_doors = false, x_trapimmune = false,
+    -- AimBot
+    aim_on = false, aim_key = nil, aim_target = "Killer",
+    aim_smooth = 8, aim_fov = 300, aim_part = "Head",
+    -- AutoCombat (UI only for now)
+    ac_surv_mode = "Assist", ac_killer_mode = "Assist",
   }
 
   local HAS_DRAWING = false
@@ -190,6 +226,15 @@ return function(api)
   local function onScreenPt(p, vs, m)
     m = m or 64
     return p.X > -m and p.X < vs.X + m and p.Y > -m and p.Y < vs.Y + m
+  end
+  local function partPos(m)
+    local pos = nil
+    pcall(function()
+      local p = m:IsA("BasePart") and m or m:FindFirstChildWhichIsA("BasePart", true)
+      if p then pos = p.Position end
+      if not pos then pos = m:GetBoundingBox().Position end
+    end)
+    return pos
   end
 
   -- --------------------------------------------------------------------------
@@ -346,18 +391,35 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- World scans (generators + items, every 2s)
+  -- World scans (generators + items + Other, every 2s)
   -- --------------------------------------------------------------------------
-  local genCache, itemCache = {}, {}
-  local genMap, itemMap = {}, {}
+  local genCache, itemCache, otherCache = {}, {}, {}
+  local genMap, itemMap, otherMap = {}, {}, {}
   local syncLabelMaps -- fwd
   local function mapRoot()
     local mf = workspace:FindFirstChild("Map")
     local ig = mf and mf:FindFirstChild("Ingame")
     return ig and ig:FindFirstChild("Map") or nil
   end
+  -- name patterns for the Other tab (lowercase substrings)
+  local OTHER_PATTERNS = {
+    graffiti = { "graffiti", "veeronica", "spray", "tag" },
+    taph = { "tripwire", "tripmine", "subspacetripmine", "subspace tripmine", "taph" },
+    azure = { "seeker", "bulb", "secretbulb", "stigmatize", "vine", "azure", "plant", "golem", "atropa" },
+    ritual = { "ritual", "twotime", "two time", "two-time", "oblation" },
+    build = { "buildermansentry", "buildermandispenser", "sentry", "dispenser" },
+  }
+  local function otherKind(name)
+    local low = string.lower(tostring(name))
+    for kind, pats in pairs(OTHER_PATTERNS) do
+      for _, p in ipairs(pats) do
+        if string.find(low, p, 1, true) then return kind end
+      end
+    end
+    return nil
+  end
   local function scanWorld()
-    local gens, items, seen = {}, {}, {}
+    local gens, items, other, seen = {}, {}, {}, {}
     local mp = mapRoot()
     if mp then
       local ok, desc = pcall(function() return mp:GetDescendants() end)
@@ -383,11 +445,7 @@ return function(api)
           local it = mp:FindFirstChild(nm)
           if it and not seen[it] then
             seen[it] = true
-            local pos = nil
-            pcall(function()
-              local p = it:IsA("BasePart") and it or it:FindFirstChildWhichIsA("BasePart", true)
-              if p then pos = p.Position end
-            end)
+            local pos = partPos(it)
             if pos then items[#items + 1] = { m = it, pos = pos, name = nm } end
           end
         end
@@ -400,31 +458,32 @@ return function(api)
         for _, v in ipairs(desc) do
           if v:FindFirstChild("ItemRoot") and not seen[v] and not itemHeld(v) then
             seen[v] = true
-            local pos = nil
-            pcall(function()
-              local p = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart", true)
-              if p then pos = p.Position end
-            end)
+            local pos = partPos(v)
             if pos then items[#items + 1] = { m = v, pos = pos, name = v.Name } end
           end
         end
       end
     end
-    -- builderman buildings (sentries/tripmines/dispensers)
+    -- Other: traps / graffiti / ritual / builds anywhere under Ingame
     do
-      local ig = mp and mp.Parent or nil
+      local mf = workspace:FindFirstChild("Map")
+      local ig = mf and mf:FindFirstChild("Ingame")
       if ig then
-        for _, v in ipairs(ig:GetChildren()) do
-          if (v.Name == "BuildermanSentry" or v.Name == "SubspaceTripmine" or v.Name == "BuildermanDispenser")
-            and not seen[v] then
-            seen[v] = true
-            local pos = nil
-            pcall(function()
-              local p = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart", true)
-              if p then pos = p.Position end
-              if not pos then pos = v:GetBoundingBox().Position end
-            end)
-            if pos then items[#items + 1] = { m = v, pos = pos, name = v.Name, build = true } end
+        local ok, desc = pcall(function() return ig:GetDescendants() end)
+        if ok then
+          for _, v in ipairs(desc) do
+            if moduleDead then return end
+            if not seen[v] and (v:IsA("Model") or v:IsA("BasePart")) then
+              local kind = otherKind(v.Name)
+              if kind and not itemHeld(v) then
+                -- skip parts buried inside already-tracked gens/items
+                local pos = partPos(v)
+                if pos then
+                  seen[v] = true
+                  other[#other + 1] = { m = v, pos = pos, name = v.Name, kind = kind }
+                end
+              end
+            end
           end
         end
       end
@@ -438,10 +497,12 @@ return function(api)
       end
       table.sort(gens, byDist)
       table.sort(items, byDist)
+      table.sort(other, byDist)
     end
     if moduleDead then return end
-    genCache, itemCache = gens, items
+    genCache, itemCache, otherCache = gens, items, other
     syncLabelMaps()
+    refreshGenList()
   end
   local function mkLabel(size)
     local t = shape("Text")
@@ -487,6 +548,29 @@ return function(api)
     end
     sync(genCache, genMap, (F.gen_on and F.gen_names) == true, F.gen_range, 13)
     sync(itemCache, itemMap, (F.item_on and F.item_names) == true, F.item_range, 12)
+    sync(otherCache, otherMap, true, 6000, 12)
+  end
+  local function genProgress(e)
+    if e.prog and e.prog.Parent then
+      local ok, v = pcall(function() return e.prog.Value end)
+      if ok and type(v) == "number" then return v end
+    end
+    return nil
+  end
+  local function otherActive(kind)
+    if kind == "graffiti" then return F.o_graffiti end
+    if kind == "taph" then return F.o_taph end
+    if kind == "azure" then return F.o_azure end
+    if kind == "ritual" then return F.o_ritual end
+    if kind == "build" then return F.o_build end
+    return false
+  end
+  local function otherColor(kind)
+    if kind == "graffiti" then return F.o_graffiti_col end
+    if kind == "taph" then return F.o_taph_col end
+    if kind == "azure" then return F.o_azure_col end
+    if kind == "ritual" then return F.o_ritual_col end
+    return F.o_build_col
   end
 
   -- --------------------------------------------------------------------------
@@ -578,56 +662,729 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- Infinite stamina (game's own sprint table, refreshed, restored on unload)
+  -- Stamina (game's own sprint table, snapshotted, restored on off/unload)
   -- --------------------------------------------------------------------------
-  local stamMod = nil
-  local stamOrig = nil
-  local function stamApply()
-    if not F.stam_on then return end
-    if not stamMod then
-      pcall(function()
-        stamMod = require(game:GetService("ReplicatedStorage").Systems.Character.Game.Sprinting)
-      end)
-      if not stamMod then return end
-    end
+  local stamMod, stamOrig = nil, nil
+  local STAM_MAX_KEYS = { "MaxStamina", "StaminaMax", "Max", "Stamina" }
+  local STAM_REGEN_KEYS = { "StaminaRegen", "RegenRate", "Regen", "RecoveryRate", "StaminaRecovery" }
+  local STAM_SPEED_KEYS = { "SprintSpeed", "RunSpeed", "Speed", "WalkSpeed", "SprintWalkSpeed" }
+  local function stamRequire()
+    if stamMod then return true end
     pcall(function()
-      if stamOrig == nil then
-        stamOrig = { loss = stamMod.StaminaLoss, dis = stamMod.StaminaLossDisabled }
+      stamMod = require(game:GetService("ReplicatedStorage").Systems.Character.Game.Sprinting)
+    end)
+    return stamMod ~= nil
+  end
+  local function stamSnapshot()
+    if stamOrig or not stamRequire() then return end
+    stamOrig = { loss = stamMod.StaminaLoss, dis = stamMod.StaminaLossDisabled, fields = {} }
+    for _, group in ipairs({ STAM_MAX_KEYS, STAM_REGEN_KEYS, STAM_SPEED_KEYS }) do
+      for _, k in ipairs(group) do
+        pcall(function()
+          local v = stamMod[k]
+          if type(v) == "number" then stamOrig.fields[k] = v end
+        end)
       end
+    end
+  end
+  -- role = "surv" | "killer"; pct sliders are 0-200 (% of snapshot, 0 = off)
+  local function stamApplyRole(role)
+    local onKey, maxKey, spdKey, regKey
+    if role == "killer" then
+      onKey, maxKey, spdKey, regKey = "stam_killer_on", "stam_killer_max", "stam_killer_speed", "stam_killer_regen"
+    else
+      onKey, maxKey, spdKey, regKey = "stam_surv_on", "stam_surv_max", "stam_surv_speed", "stam_surv_regen"
+    end
+    if not F[onKey] then return end
+    if not stamRequire() then return end
+    stamSnapshot()
+    pcall(function()
       stamMod.StaminaLoss = 0
       stamMod.StaminaLossDisabled = true
     end)
+    local function scale(keys, pct)
+      pct = tonumber(pct) or 0
+      if pct <= 0 then return end
+      for _, k in ipairs(keys) do
+        pcall(function()
+          local base = stamOrig.fields[k]
+          if type(base) == "number" then stamMod[k] = base * pct / 100 end
+        end)
+      end
+    end
+    scale(STAM_MAX_KEYS, F[maxKey])
+    scale(STAM_SPEED_KEYS, F[spdKey])
+    scale(STAM_REGEN_KEYS, F[regKey])
   end
-  local function stamRestore()
+  local function stamTick()
+    if F.stam_surv_on or F.stam_killer_on then
+      stamApplyRole("surv")
+      stamApplyRole("killer")
+    elseif stamMod then
+      stamRestore()
+    end
+  end
+  local function stamResetRole(role)
+    -- back to snapshot values without disabling the toggle (re-applies clean)
     if stamMod and stamOrig then
       pcall(function()
         stamMod.StaminaLoss = stamOrig.loss
         stamMod.StaminaLossDisabled = stamOrig.dis
+        for k, v in pairs(stamOrig.fields) do stamMod[k] = v end
+      end)
+    end
+    Notify("Stamina", (role == "killer" and "Killer" or "Survivor") .. " values reset to game defaults", "ok")
+  end
+  function stamRestore()
+    if stamMod and stamOrig then
+      pcall(function()
+        stamMod.StaminaLoss = stamOrig.loss
+        stamMod.StaminaLossDisabled = stamOrig.dis
+        for k, v in pairs(stamOrig.fields) do stamMod[k] = v end
       end)
     end
     stamMod, stamOrig = nil, nil
   end
+
   -- --------------------------------------------------------------------------
-  -- Generator progress readout (for ESP/glow only — no repair calls here;
-  -- the server kicks for automated RF/RE, so repair is 100% manual now)
+  -- GenFix: auto repair loop (prompt firing = same as pressing the key).
+  -- The server has kicked (267) for repair automation before, so this is
+  -- OFF by default and the UI says so.
   -- --------------------------------------------------------------------------
-  local function genProgress(e)
-    if e.prog and e.prog.Parent then
-      local ok, v = pcall(function() return e.prog.Value end)
-      if ok and type(v) == "number" then return v end
+  local genfixDD, genfixStatus
+  local genfixNames = { "—" }
+  local genfixT, genfixTarget = 0, nil
+  local function refreshGenList()
+    local names = {}
+    for _, e in ipairs(genCache) do
+      local p = genProgress(e)
+      if e.m.Parent and (p == nil or p < 100) then
+        table.insert(names, e.name)
+      end
     end
-    return nil
+    if #names == 0 then names = { "—" } end
+    genfixNames = names
+    if genfixDD then
+      pcall(function() genfixDD.SetOptions(names, true) end)
+      if F.genfix_custom == "—" or F.genfix_custom == nil then
+        F.genfix_custom = names[1]
+        pcall(function() genfixDD.Set(names[1], true) end)
+      end
+    end
+  end
+  local function genfixPick()
+    local unfinished = {}
+    for _, e in ipairs(genCache) do
+      local p = genProgress(e)
+      if e.m.Parent and e.pos and (p == nil or p < 100) then
+        unfinished[#unfinished + 1] = e
+      end
+    end
+    if #unfinished == 0 then return nil end
+    if F.genfix_mode == "Custom" and F.genfix_custom ~= "—" then
+      for _, e in ipairs(unfinished) do
+        if e.name == F.genfix_custom then return e end
+      end
+    end
+    return unfinished[math.random(1, #unfinished)]
+  end
+  local function genfixSet(on, silent)
+    F.genfix_on = on == true
+    if on and not silent then
+      Notify("GenFix", "Auto-repair ON (" .. tostring(F.genfix_mode) .. ") — kick risk, watch it", "warn")
+    elseif silent == false then
+      Notify("GenFix", "Auto-repair OFF", "info")
+    end
+    if genfixStatus then
+      pcall(function()
+        genfixStatus.Set(on and ("running · " .. tostring(F.genfix_mode)) or "idle")
+      end)
+    end
+  end
+  local function genfixTick(now)
+    if not F.genfix_on then return end
+    local rate = tonumber(F.genfix_rate) or 1
+    if now - genfixT < rate then return end
+    genfixT = now
+    guarded("genfix", function()
+      local hrp = myHRP()
+      if not hrp then return end
+      local target = genfixTarget
+      if not (target and target.m.Parent) then
+        target = genfixPick()
+        genfixTarget = target
+      end
+      if not target then
+        if genfixStatus then pcall(function() genfixStatus.Set("idle · no unfinished gens") end) end
+        return
+      end
+      local p = genProgress(target)
+      if p ~= nil and p >= 100 then genfixTarget = nil return end
+      if (target.pos - hrp.Position).Magnitude > 12 then
+        pcall(function()
+          hrp.CFrame = CFrame.new(target.pos + Vector3.new(0, 3, 0))
+        end)
+        if genfixStatus then
+          pcall(function() genfixStatus.Set("→ " .. target.name) end)
+        end
+        return
+      end
+      local prompt = target.m:FindFirstChildWhichIsA("ProximityPrompt", true)
+      if prompt and type(fireproximityprompt) == "function" then
+        pcall(fireproximityprompt, prompt)
+      end
+      if genfixStatus then pcall(function() genfixStatus.Set("repairing " .. target.name) end) end
+    end)
+  end
+  -- hide the generator minigame UI while GenFix runs (tracked, restored)
+  local genfixHidden = {}
+  local GENUI_PATTERNS = { "flowgame", "flow", "puzzle", "minigame", "generator" }
+  local function genfixHideUI(on)
+    if on then
+      pcall(function()
+        local pg = LP:FindFirstChild("PlayerGui")
+        if not pg then return end
+        for _, d in ipairs(pg:GetDescendants()) do
+          local low = string.lower(tostring(d.Name))
+          for _, pat in ipairs(GENUI_PATTERNS) do
+            if string.find(low, pat, 1, true)
+              and (d:IsA("ScreenGui") or d:IsA("Frame") or d:IsA("BillboardGui")) then
+              if d.Enabled ~= false and d.Visible ~= false then
+                genfixHidden[#genfixHidden + 1] = d
+                pcall(function()
+                  if d:IsA("ScreenGui") or d:IsA("BillboardGui") then d.Enabled = false
+                  else d.Visible = false end
+                end)
+              end
+              break
+            end
+          end
+        end
+      end)
+    else
+      for _, d in ipairs(genfixHidden) do
+        pcall(function()
+          if d.Parent then
+            if d:IsA("ScreenGui") or d:IsA("BillboardGui") then d.Enabled = true
+            else d.Visible = true end
+          end
+        end)
+      end
+      genfixHidden = {}
+    end
+  end
+
+  -- --------------------------------------------------------------------------
+  -- Antis
+  -- --------------------------------------------------------------------------
+  local ANTI_PATTERNS = {
+    slow = { "slow", "slowness", "snare", "cripple", "exhaust", "tired" },
+    stun = { "stun", "stunned", "helpless", "daze", "stagger" },
+    root = { "root", "rooted", "freeze", "frozen", "trap", "trapped", "grab", "grabbed", "held" },
+  }
+  local function antiStrip(group)
+    local ch = myChar()
+    if not ch then return end
+    for _, pat in ipairs(ANTI_PATTERNS[group]) do
+      pcall(function()
+        for k, _ in pairs(ch:GetAttributes()) do
+          if string.find(string.lower(tostring(k)), pat, 1, true) then
+            ch:SetAttribute(k, nil)
+          end
+        end
+      end)
+      for _, v in ipairs(ch:GetChildren()) do
+        pcall(function()
+          if (v:IsA("StringValue") or v:IsA("NumberValue")
+            or v:IsA("BoolValue") or v:IsA("IntValue"))
+            and string.find(string.lower(v.Name), pat, 1, true) then
+            v:Destroy()
+          end
+        end)
+      end
+    end
+  end
+  -- Debuffs: screen-effect GUIs hidden while on (tracked, restored)
+  local debHidden = {}
+  local DEB_PATTERNS = { "vignette", "lowhealth", "lowhp", "damage", "hurt",
+    "glitch", "hallucin", "subspace", "subspaced", "flash", "blind", "overlay",
+    "effect", "blood", "injure", "dizzy" }
+  local function debApplyGui(on)
+    if on then
+      pcall(function()
+        local pg = LP:FindFirstChild("PlayerGui")
+        if not pg then return end
+        for _, d in ipairs(pg:GetDescendants()) do
+          if d:IsA("ScreenGui") or d:IsA("Frame") or d:IsA("ImageLabel") then
+            local low = string.lower(tostring(d.Name))
+            for _, pat in ipairs(DEB_PATTERNS) do
+              if string.find(low, pat, 1, true) then
+                local vis = true
+                pcall(function()
+                  vis = (d.Enabled ~= false) and (d.Visible ~= false)
+                end)
+                if vis then
+                  debHidden[#debHidden + 1] = d
+                  pcall(function()
+                    if d:IsA("ScreenGui") then d.Enabled = false
+                    else d.Visible = false end
+                  end)
+                end
+                break
+              end
+            end
+          end
+        end
+      end)
+    else
+      for _, d in ipairs(debHidden) do
+        pcall(function()
+          if d.Parent then
+            if d:IsA("ScreenGui") then d.Enabled = true else d.Visible = true end
+          end
+        end)
+      end
+      debHidden = {}
+    end
+  end
+  -- Debuffs: post-processing in Lighting (tracked, restored)
+  local debPostOrig = {}
+  local function debApplyPost(on)
+    pcall(function()
+      local lighting = game:GetService("Lighting")
+      if on then
+        for _, e in ipairs(lighting:GetChildren()) do
+          pcall(function()
+            if e:IsA("BlurEffect") or e:IsA("ColorCorrectionEffect")
+              or e:IsA("SunRaysEffect") or e:IsA("BloomEffect")
+              or e:IsA("DepthOfFieldEffect") then
+              if debPostOrig[e] == nil then debPostOrig[e] = e.Enabled end
+              e.Enabled = false
+            end
+          end)
+        end
+      else
+        for e, was in pairs(debPostOrig) do
+          pcall(function() if e.Parent then e.Enabled = was end end)
+        end
+        debPostOrig = {}
+      end
+    end)
+  end
+  -- Exploits: killer-only doors phase-through (tracked, restored)
+  local DOOR_PATTERNS = { "killerdoor", "killer door", "killeronly", "killer only",
+    "killergate", "killergate", "killerpassage", "killer vent", "killerside" }
+  local doorTouched = {}
+  local function doorsApply(on)
+    if on then
+      pcall(function()
+        local mf = workspace:FindFirstChild("Map")
+        local ig = mf and mf:FindFirstChild("Ingame")
+        local root = ig or workspace
+        for _, d in ipairs(root:GetDescendants()) do
+          local okB, isBase = pcall(function() return d:IsA("BasePart") end)
+          if okB and isBase then
+            local low = string.lower(tostring(d.Name))
+            for _, pat in ipairs(DOOR_PATTERNS) do
+              if string.find(low, pat, 1, true) then
+                if doorTouched[d] == nil then
+                  doorTouched[d] = d.CanCollide
+                  pcall(function() d.CanCollide = false end)
+                end
+                break
+              end
+            end
+          end
+        end
+      end)
+    else
+      for part, was in pairs(doorTouched) do
+        pcall(function() if part.Parent then part.CanCollide = was end end)
+      end
+      doorTouched = {}
+    end
+  end
+  -- Exploits: Taph trap immunity (local touch suppression; the server may
+  -- still register the trigger — the UI says so)
+  local trapTouched = {}
+  local function trapsApply(on)
+    if on then
+      pcall(function()
+        for _, e in ipairs(otherCache) do
+          if e.kind == "taph" and e.m.Parent then
+            for _, part in ipairs(e.m:IsA("Model") and e.m:GetDescendants() or { e.m }) do
+              pcall(function()
+                if part:IsA("BasePart") and trapTouched[part] == nil then
+                  trapTouched[part] = part.CanTouch
+                  part.CanTouch = false
+                end
+              end)
+            end
+          end
+        end
+      end)
+    else
+      for part, was in pairs(trapTouched) do
+        pcall(function() if part.Parent then part.CanTouch = was end end)
+      end
+      trapTouched = {}
+    end
+  end
+
+  -- --------------------------------------------------------------------------
+  -- AimBot (camera aim, client-side)
+  -- --------------------------------------------------------------------------
+  local function aimTargetPart(ch)
+    if not ch then return nil end
+    local want = F.aim_part or "Head"
+    if want == "HRP" then return ch:FindFirstChild("HumanoidRootPart") end
+    return ch:FindFirstChild(want == "Torso" and "Torso" or "Head")
+      or ch:FindFirstChild("HumanoidRootPart")
+  end
+  local function aimTick()
+    if not F.aim_on then return end
+    camera = workspace.CurrentCamera or camera
+    if not camera then return end
+    guarded("aim", function()
+      local meHRP = myHRP()
+      if not meHRP then return end
+      local vs = camera.ViewportSize
+      local cx, cy, best, bestD = vs.X / 2, vs.Y / 2, nil, tonumber(F.aim_fov) or 300
+      local wantKiller = (F.aim_target or "Killer") == "Killer"
+      for _, pl in ipairs(players:GetPlayers()) do
+        if pl ~= LP then
+          local ch = charOf(pl)
+          local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+          if ch and hum and hum.Health > 0 then
+            local killer = isKiller(pl)
+            if (wantKiller and killer) or ((not wantKiller) and not killer) then
+              local part = aimTargetPart(ch)
+              if part then
+                local sp, heard = wts(part.Position)
+                if heard and onScreenPt(sp, vs, 400) then
+                  local d = math.sqrt((sp.X - cx) ^ 2 + (sp.Y - cy) ^ 2)
+                  if d < bestD then bestD, best = d, part end
+                end
+              end
+            end
+          end
+        end
+      end
+      if best then
+        local dir = (best.Position - camera.CFrame.Position)
+        if dir.Magnitude > 0.5 then
+          local want = CFrame.lookAt(camera.CFrame.Position, best.Position)
+          local s = clamp(tonumber(F.aim_smooth) or 8, 1, 30)
+          camera.CFrame = camera.CFrame:Lerp(want, 1 / s)
+        end
+      end
+    end)
+  end
+  local function aimSet(on, silent)
+    F.aim_on = on == true
+    if not silent then
+      Notify("AimBot", on and ("ON — " .. tostring(F.aim_target)) or "OFF",
+        on and "ok" or "info")
+    end
+  end
+
+  -- --------------------------------------------------------------------------
+  -- Killer alert (popup notification, edge-triggered + cooldown)
+  -- --------------------------------------------------------------------------
+  local alertFired, alertT = false, 0
+  local function alertTick(now)
+    if not F.alert_on then alertFired = false return end
+    if killerNear and not alertFired and now - alertT > 10 then
+      alertFired, alertT = true, now
+      Notify("KILLER NEAR", "Killer " .. math.floor(killerDist + 0.5) .. "m away",
+        "error")
+    elseif not killerNear then
+      alertFired = false
+    end
   end
 
   -- --------------------------------------------------------------------------
   -- Status
   -- --------------------------------------------------------------------------
-  local statLbl, dbgLbl
-  local statTick, scanTick, labelTick, stamTick, nP, nK = 0, 0, 0, 0, 0, 0
+  local statLbl, dbgLbl, antiTick, stamTick2, utilTick = nil, nil, 0, 0, 0
+  local statTick, scanTick, labelTick, nP, nK = 0, 0, 0, 0, 0
   local killerNear, killerDist = false, math.huge
 
   -- --------------------------------------------------------------------------
-  -- Main loop (eyes + camera + own repair remote only)
+  -- Frame workers (split out of the RenderStepped closure: Lua caps a
+  -- single function at 60 upvalues, and the loop body blew past it)
+  -- --------------------------------------------------------------------------
+  local function framePlayers(meHRP, vs, seenGlow)
+    if not meHRP then
+      for _, e in pairs(pesc) do hideRig(e) end
+      return
+    end
+    local plist = players:GetPlayers()
+    for _, pl in ipairs(plist) do
+      if pl ~= LP then
+        local playerOk = guarded("players", function()
+          local e = pesc[pl]
+          local ch = charOf(pl)
+          local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+          local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+          if not (ch and hum and hum.Health > 0 and hrp) then hideRig(e) return end
+          local d = (meHRP.Position - hrp.Position).Magnitude
+          if d ~= d or d > F.esp_range then hideRig(e) return end
+          nP = nP + 1
+          local killer = isKiller(pl)
+          if killer then
+            nK = nK + 1
+            if d < killerDist then killerDist = d end
+            if d <= (F.alert_range or 200) then killerNear = true end
+          end
+          local show = (killer and F.esp_killer) or ((not killer) and F.esp_surv)
+          local col = killer and F.esp_killercol or F.esp_survcol
+          local gcol = killer and F.glow_killercol or F.glow_survcol
+          local gon = (killer and F.glow_killer) or ((not killer) and F.glow_surv)
+          if gon then
+            local key = glowKey(ch, killer and "k" or "s")
+            setGlow(ch, gcol, true, killer and "k" or "s")
+            seenGlow[key] = true
+          end
+          if not F.esp_box and not F.esp_health and not F.esp_name and not F.esp_dist then
+            hideRig(e) return
+          end
+          if not show then hideRig(e) return end
+          e = rigOf(pl)
+          if not e then return end
+          local x0, y0, w, h, cx = characterRect(ch, hrp, vs)
+          if not x0 then hideRig(e) return end
+          if not onScreen2(x0, y0, w, h, vs, 120) then hideRig(e) return end
+          local th = F.esp_thick or 2
+          local dm = math.floor(d + 0.5) .. "m"
+          e.outline.Visible = F.esp_box == true
+          if e.outline.Visible then
+            e.outline.Color = Color3.new(0, 0, 0)
+            e.outline.Thickness = th + 2
+            e.outline.Position = V2(x0 - 1, y0 - 1)
+            e.outline.Size = V2(w + 2, h + 2)
+          end
+          e.box.Visible = F.esp_box == true
+          if e.box.Visible then
+            e.box.Color = col
+            e.box.Thickness = th
+            e.box.Position = V2(x0, y0)
+            e.box.Size = V2(w, h)
+          end
+          local showHp = F.esp_health and hum.MaxHealth > 0
+          e.hback.Visible = showHp
+          e.hfill.Visible = showHp
+          if showHp then
+            local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
+            e.hback.Color = Color3.new(0, 0, 0)
+            e.hback.Thickness = th
+            e.hback.Position = V2(x0 - 7, y0)
+            e.hback.Size = V2(3, h)
+            e.hfill.Color = Color3.new(1 - frac, frac * 0.9, 0.15)
+            e.hfill.Thickness = th
+            e.hfill.Position = V2(x0 - 7, y0 + h * (1 - frac))
+            e.hfill.Size = V2(3, math.max(h * frac, 1))
+          end
+          e.trace.Visible = false
+          e.name.Visible = F.esp_name == true
+          if e.name.Visible then
+            e.name.Text = pl.DisplayName ~= pl.Name
+              and (pl.DisplayName .. " (@" .. pl.Name .. ")") or pl.Name
+            e.name.Color = col
+            e.name.Position = V2(cx, y0 - 17)
+          end
+          local wy = y0 + h + 3
+          e.dist.Visible = F.esp_dist == true
+          if e.dist.Visible then
+            e.dist.Text = dm
+            e.dist.Color = col
+            e.dist.Position = V2(cx, wy)
+          end
+        end)
+        if not playerOk then freeRig(pl); rigRetry[pl] = os.clock() + 2 end
+      end
+    end
+  end
+  local function frameWorld(meHRP, vs, seenGlow)
+    if not meHRP then
+      for _, o in pairs(genMap) do
+        if o.lbl then pcall(function() o.lbl.Visible = false end) end
+      end
+      for _, o in pairs(itemMap) do
+        if o.lbl then pcall(function() o.lbl.Visible = false end) end
+      end
+      for _, o in pairs(otherMap) do
+        if o.lbl then pcall(function() o.lbl.Visible = false end) end
+      end
+      return
+    end
+    guarded("world", function()
+      local mp = meHRP.Position
+      local function draw(cache, on, names, col, poolTag)
+        for _, e in ipairs(cache) do
+          local L = e.lbl
+          if L then L.Visible = false end
+          if on and e.m.Parent and e.pos then
+            local d = (mp - e.pos).Magnitude
+            local range = (poolTag == "g") and (F.gen_range or 4000)
+              or (poolTag == "o") and 6000 or (F.item_range or 2500)
+            if d == d and d <= range then
+              local sp, heard = wts(e.pos)
+              if L and heard and names and onScreenPt(sp, vs) then
+                local tag = e.name
+                if e.prog and e.prog.Parent then
+                  local okP, pv = pcall(function() return e.prog.Value end)
+                  if okP and type(pv) == "number" then
+                    tag = ("Generator %d%%"):format(clamp(math.floor(pv + 0.5), 0, 100))
+                  end
+                end
+                L.Text = tag .. "  " .. math.floor(d + 0.5) .. "m"
+                L.Color = col
+                L.Position = V2(sp.X, sp.Y)
+                L.Visible = true
+              end
+            end
+          end
+        end
+      end
+      draw(genCache, F.gen_on == true, F.gen_names == true, F.gen_col, "g")
+      draw(itemCache, F.item_on == true, F.item_names == true, F.item_col, "i")
+      -- Other: per-kind flags + fake-gen suspects (Noli rounds: more
+      -- gens than realCount => extras marked "?FAKE")
+      local realN = tonumber(F.fake_realcount) or 5
+      for _, e in ipairs(otherCache) do
+        local L = e.lbl
+        if L then L.Visible = false end
+        if e.m.Parent and e.pos and otherActive(e.kind) then
+          local d = (mp - e.pos).Magnitude
+          if d == d and d <= 6000 then
+            local sp, heard = wts(e.pos)
+            if L and heard and onScreenPt(sp, vs) then
+              L.Text = e.name .. "  " .. math.floor(d + 0.5) .. "m"
+              L.Color = otherColor(e.kind)
+              L.Position = V2(sp.X, sp.Y)
+              L.Visible = true
+            end
+          end
+        end
+      end
+      local gi = 0
+      for _, e in ipairs(genCache) do
+        gi = gi + 1
+        local L = e.lbl
+        if F.o_fake and gi > realN and L and e.m.Parent and e.pos then
+          local d = (mp - e.pos).Magnitude
+          if d == d and d <= (F.gen_range or 4000) then
+            local sp, heard = wts(e.pos)
+            if heard and onScreenPt(sp, vs) then
+              L.Text = "?FAKE " .. e.name .. "  " .. math.floor(d + 0.5) .. "m"
+              L.Color = F.o_fake_col
+              L.Position = V2(sp.X, sp.Y - 14)
+              L.Visible = true
+            end
+          end
+        end
+      end
+      -- Azure vine attack radius (19m default, adjustable)
+      if F.o_azure and F.azure_radius_on then
+        for _, e in ipairs(otherCache) do
+          if e.kind == "azure" and e.m.Parent and e.pos then
+            local d = (mp - e.pos).Magnitude
+            if d == d and d <= 6000 then
+              guarded("azure", function()
+                local c = tshape("Circle")
+                local sp, heard = wts(e.pos)
+                if heard and onScreenPt(sp, vs, 400) then
+                  local scale = 800 / math.max((camera.CFrame.Position - e.pos).Magnitude, 1)
+                  c.Color = F.o_azure_col
+                  c.Transparency = 0.5
+                  c.Filled = false
+                  c.Thickness = 1
+                  c.NumSides = 32
+                  c.Radius = (tonumber(F.azure_radius) or 19) * scale * 4
+                  c.Position = V2(sp.X, sp.Y)
+                else
+                  c.Visible = false
+                end
+              end)
+            end
+          end
+        end
+      end
+      -- glow pass, nearest-first (caches are sorted)
+      local shown = 0
+      local cap = GLOW_LOOT_CAP
+      local function glow(cache, on, col)
+        if not on then return end
+        for _, e in ipairs(cache) do
+          if shown >= cap then return end
+          if e.m.Parent and e.pos and (mp - e.pos).Magnitude <= ((cache == genCache) and (F.gen_range or 4000) or (F.item_range or 2500)) then
+            -- finished (100%) generators glow green, always
+            local gc = col
+            if cache == genCache then
+              local p = genProgress(e)
+              if p ~= nil and p >= 100 then gc = Color3.fromRGB(0, 255, 0) end
+            end
+            local key = glowKey(e.m, cache == genCache and "g" or "i")
+            setGlow(e.m, gc, true, cache == genCache and "g" or "i", "loot")
+            seenGlow[key] = true
+            shown = shown + 1
+          end
+        end
+      end
+      glow(genCache, F.gen_on == true, F.gen_col)
+      glow(itemCache, F.item_on == true, F.item_col)
+    end)
+  end
+  local function frameUtil(now)
+    alertTick(now)
+    aimTick()
+    genfixTick(now)
+    if now - utilTick > 2 then
+      utilTick = now
+      guarded("anti-util", function()
+        -- re-apply flags that new spawns would otherwise dodge
+        if F.x_doors then doorsApply(true) end
+        if F.x_trapimmune then trapsApply(true) end
+        if F.genfix_on and F.genfix_hideui then genfixHideUI(true) end
+        if F.deb_gui then debApplyGui(true) end
+      end)
+    end
+    if now - antiTick > 0.25 then
+      antiTick = now
+      guarded("anti", function()
+        if F.anti_slow then antiStrip("slow") end
+        if F.anti_stun then antiStrip("stun") end
+        if F.anti_root then antiStrip("root") end
+      end)
+    end
+    if now - stamTick2 > 0.5 then
+      stamTick2 = now
+      guarded("stam", stamTick)
+    end
+    if statLbl and now - statTick > 2 then
+      statTick = now
+      pcall(function()
+        statLbl.Set(("players %d · killers %d%s%s%s"):format(nP, nK,
+          (F.alert_on and killerNear) and (" · KILLER " .. math.floor(killerDist + 0.5) .. "m") or "",
+          #genCache > 0 and (" · gens " .. #genCache) or "",
+          #otherCache > 0 and (" · other " .. #otherCache) or ""))
+        local parts = { ("loop %dfps"):format(dbg.fps) }
+        table.insert(parts, ("glow E%d/20 L%d/10"):format(
+          math.min(glowUsedEntity, 99), math.min(glowUsedLoot, 99)))
+        for _, sec in ipairs({ "scan", "labels", "players", "world", "azure", "genfix", "aim", "anti", "stam" }) do
+          if dbg.err[sec] then
+            table.insert(parts, sec .. "!" .. dbg.err[sec])
+          end
+        end
+        if dbg.last ~= "" then table.insert(parts, dbg.last) end
+        dbgLbl.Set(table.concat(parts, " - "))
+      end)
+    end
+  end
+
+  -- --------------------------------------------------------------------------
+  -- Main loop
   -- --------------------------------------------------------------------------
   reg(runService.RenderStepped:Connect(function(dt)
     clearTransient()
@@ -650,222 +1407,15 @@ return function(api)
       glowUsedEntity, glowUsedLoot = 0, 0
       nP, nK = 0, 0
       killerNear, killerDist = false, math.huge
-
-      -- players
-      if meHRP then
-        local plist = players:GetPlayers()
-        for _, pl in ipairs(plist) do
-          if pl ~= LP then
-            local playerOk = guarded("players", function()
-              local e = pesc[pl]
-              local ch = charOf(pl)
-              local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-              local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-              if not (ch and hum and hum.Health > 0 and hrp) then hideRig(e) return end
-              local d = (meHRP.Position - hrp.Position).Magnitude
-              if d ~= d or d > F.esp_range then hideRig(e) return end
-              nP = nP + 1
-              local killer = isKiller(pl)
-              if killer then
-                nK = nK + 1
-                if d < killerDist then killerDist = d end
-                if d <= (F.alert_range or 200) then killerNear = true end
-              end
-              local show = (killer and F.esp_killer) or ((not killer) and F.esp_surv)
-              local col = killer and F.esp_killercol or F.esp_survcol
-              local gcol = killer and F.glow_killercol or F.glow_survcol
-              local gon = (killer and F.glow_killer) or ((not killer) and F.glow_surv)
-              if gon then
-                local key = glowKey(ch, killer and "k" or "s")
-                setGlow(ch, gcol, true, killer and "k" or "s")
-                seenGlow[key] = true
-              end
-              if not F.esp_box and not F.esp_health and not F.esp_name and not F.esp_dist then
-                hideRig(e) return
-              end
-              if not show then hideRig(e) return end
-              e = rigOf(pl)
-              if not e then return end
-              local x0, y0, w, h, cx = characterRect(ch, hrp, vs)
-              if not x0 then hideRig(e) return end
-              if not onScreen2(x0, y0, w, h, vs, 120) then hideRig(e) return end
-              local th = F.esp_thick or 2
-              local dm = math.floor(d + 0.5) .. "m"
-              e.outline.Visible = F.esp_box == true
-              if e.outline.Visible then
-                e.outline.Color = Color3.new(0, 0, 0)
-                e.outline.Thickness = th + 2
-                e.outline.Position = V2(x0 - 1, y0 - 1)
-                e.outline.Size = V2(w + 2, h + 2)
-              end
-              e.box.Visible = F.esp_box == true
-              if e.box.Visible then
-                e.box.Color = col
-                e.box.Thickness = th
-                e.box.Position = V2(x0, y0)
-                e.box.Size = V2(w, h)
-              end
-              local showHp = F.esp_health and hum.MaxHealth > 0
-              e.hback.Visible = showHp
-              e.hfill.Visible = showHp
-              if showHp then
-                local frac = clamp(hum.Health / hum.MaxHealth, 0, 1)
-                e.hback.Color = Color3.new(0, 0, 0)
-                e.hback.Thickness = th
-                e.hback.Position = V2(x0 - 7, y0)
-                e.hback.Size = V2(3, h)
-                e.hfill.Color = Color3.new(1 - frac, frac * 0.9, 0.15)
-                e.hfill.Thickness = th
-                e.hfill.Position = V2(x0 - 7, y0 + h * (1 - frac))
-                e.hfill.Size = V2(3, math.max(h * frac, 1))
-              end
-              e.trace.Visible = false
-              e.name.Visible = F.esp_name == true
-              if e.name.Visible then
-                e.name.Text = pl.DisplayName ~= pl.Name
-                  and (pl.DisplayName .. " (@" .. pl.Name .. ")") or pl.Name
-                e.name.Color = col
-                e.name.Position = V2(cx, y0 - 17)
-              end
-              local wy = y0 + h + 3
-              e.dist.Visible = F.esp_dist == true
-              if e.dist.Visible then
-                e.dist.Text = dm
-                e.dist.Color = col
-                e.dist.Position = V2(cx, wy)
-              end
-            end)
-            if not playerOk then freeRig(pl); rigRetry[pl] = os.clock() + 2 end
-          end
-        end
-      else
-        for _, e in pairs(pesc) do hideRig(e) end
-      end
-
-      -- items + generators (labels + loot-pool glow)
-      if meHRP then
-        guarded("world", function()
-          local mp = meHRP.Position
-          local function draw(cache, on, names, col, poolTag)
-            for _, e in ipairs(cache) do
-              local L = e.lbl
-              if L then L.Visible = false end
-              if on and e.m.Parent and e.pos then
-                local d = (mp - e.pos).Magnitude
-                local range = (poolTag == "g") and (F.gen_range or 4000) or (F.item_range or 2500)
-                if d == d and d <= range then
-                  local sp, heard = wts(e.pos)
-                  if L and heard and names and onScreenPt(sp, vs) then
-                    local tag = e.name
-                    if e.prog and e.prog.Parent then
-                      local okP, pv = pcall(function() return e.prog.Value end)
-                      if okP and type(pv) == "number" then
-                        tag = ("Generator %d%%"):format(clamp(math.floor(pv + 0.5), 0, 100))
-                      end
-                    elseif e.build then
-                      tag = e.name
-                    end
-                    L.Text = tag .. "  " .. math.floor(d + 0.5) .. "m"
-                    L.Color = e.build and F.build_col or col
-                    L.Position = V2(sp.X, sp.Y)
-                    L.Visible = true
-                  end
-                end
-              end
-            end
-          end
-          draw(genCache, F.gen_on == true, F.gen_names == true, F.gen_col, "g")
-          draw(itemCache, F.item_on == true, F.item_names == true, F.item_col, "i")
-          -- glow pass, nearest-first (caches are sorted)
-          local shown = 0
-          local cap = GLOW_LOOT_CAP
-          local function glow(cache, on, col)
-            if not on then return end
-            for _, e in ipairs(cache) do
-              if shown >= cap then return end
-              if e.m.Parent and e.pos and (mp - e.pos).Magnitude <= ((cache == genCache) and (F.gen_range or 4000) or (F.item_range or 2500)) then
-                -- finished (100%) generators glow green, always
-                local gc = col
-                if cache == genCache then
-                  local p = genProgress(e)
-                  if p ~= nil and p >= 100 then gc = Color3.fromRGB(0, 255, 0) end
-                end
-                local key = glowKey(e.m, cache == genCache and "g" or "i")
-                setGlow(e.m, gc, true, cache == genCache and "g" or "i", "loot")
-                seenGlow[key] = true
-                shown = shown + 1
-              end
-            end
-          end
-          glow(genCache, F.gen_on == true, F.gen_col)
-          glow(itemCache, F.item_on == true, F.item_col)
-        end)
-      else
-        for _, o in pairs(genMap) do
-          if o.lbl then pcall(function() o.lbl.Visible = false end) end
-        end
-        for _, o in pairs(itemMap) do
-          if o.lbl then pcall(function() o.lbl.Visible = false end) end
-        end
-      end
-
-      -- killer proximity alert: quiet dot under the crosshair
-      if F.alert_on and killerNear then
-        guarded("hud", function()
-          local warn = tshape("Circle")
-          warn.Color = Color3.fromRGB(220, 20, 60)
-          warn.Transparency = 1
-          warn.Filled = false
-          warn.Thickness = 2
-          warn.NumSides = 24
-          warn.Radius = 9
-          warn.Position = V2(vs.X / 2, vs.Y / 2 + 30)
-        end)
-      end
-
-      -- (repair remotes removed: the server kicks for automated RF/RE.
-      -- Repair is manual E + the minigame solver below.)
-      if F.stam_on and now - stamTick > 0.5 then
-        stamTick = now
-        guarded("stam", stamApply)
-      elseif not F.stam_on and stamMod then
-        guarded("stam", stamRestore)
-      end
-
+      framePlayers(meHRP, vs, seenGlow)
+      frameWorld(meHRP, vs, seenGlow)
+      frameUtil(now)
       gcGlow(seenGlow)
-
-      if statLbl and now - statTick > 2 then
-        statTick = now
-        pcall(function()
-          statLbl.Set(("players %d · killers %d%s%s"):format(nP, nK,
-            (F.alert_on and killerNear) and (" · KILLER " .. math.floor(killerDist + 0.5) .. "m") or "",
-            #genCache > 0 and (" · gens " .. #genCache) or ""))
-          local parts = { ("loop %dfps"):format(dbg.fps) }
-          table.insert(parts, ("glow E%d/20 L%d/10"):format(
-            math.min(glowUsedEntity, 99), math.min(glowUsedLoot, 99)))
-          for _, sec in ipairs({ "scan", "labels", "players", "world", "aura", "hud" }) do
-            if dbg.err[sec] then
-              table.insert(parts, sec .. "!" .. dbg.err[sec])
-            end
-          end
-          if dbg.last ~= "" then table.insert(parts, dbg.last) end
-          dbgLbl.Set(table.concat(parts, " - "))
-        end)
-      end
     end)
     finishTransient()
     if not renderOk then dbg.err.render = (dbg.err.render or 0) + 1; dbg.last = tostring(renderError) end
   end))
 
-  local function hubOpen()
-    local ok, vis = pcall(function() return api.Win:IsVisible() end)
-    if ok and type(vis) == "boolean" then return vis end
-    local ok2, vis2 = pcall(function() return api.Win.Visible end)
-    if ok2 and type(vis2) == "boolean" then return vis2 end
-    return false
-  end
-
-  local pages = {}
   unloadModule = function()
     if moduleDead then return end
     moduleDead = true
@@ -877,11 +1427,16 @@ return function(api)
       pcall(function() flowFG.new = flowOrigNew end)
       flowFG, flowOrigNew = nil, nil
     end
+    pcall(function() genfixHideUI(false) end)
+    pcall(function() debApplyGui(false) end)
+    pcall(function() debApplyPost(false) end)
+    pcall(function() doorsApply(false) end)
+    pcall(function() trapsApply(false) end)
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for k in pairs(glowSeenT) do glowSeenT[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
-    for _, maps in ipairs({ genMap, itemMap }) do
+    for _, maps in ipairs({ genMap, itemMap, otherMap }) do
       for m, o in pairs(maps) do
         if o.lbl then pcall(function() o.lbl:Remove() end) end
         maps[m] = nil
@@ -895,7 +1450,7 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- UI: ESP / Fix / About
+  -- UI
   -- --------------------------------------------------------------------------
   local function flagToggle(sec, name, key, desc, tip)
     return sec:Toggle({ Name = name, Desc = desc, Default = F[key] == true,
@@ -913,21 +1468,31 @@ return function(api)
     return sec:Color({ Name = name, Default = F[key], Flag = "fs_" .. key,
       Tooltip = tip, Callback = function(v) F[key] = v end })
   end
+  local function flagKey(sec, name, key, def, tip)
+    return sec:Keybind({ Name = name, Default = def, Flag = "fs_" .. key,
+      Tooltip = tip, Callback = function(v) F[key] = v end })
+  end
 
+  local pages = {}
   local nav = api.Navigation or Tab:Navigation({ Name = "Forsaken" })
   local menuDefs = {
-    { "ESP", "□", "Killers, survivors, items, generators" },
-    { "Fix", "⚒", "Minigame solver, stamina" },
+    { "Visual", "□", "Players, items, traps, builds" },
+    { "Stamina", "⚡", "Survivor / killer stamina + speed" },
+    { "GenFix", "⚒", "Auto repair, solver, generator UI" },
+    { "Antis", "○", "Movement, debuffs, exploits" },
+    { "AimBot", "◎", "Camera aim with keybind" },
+    { "AutoCombat", "✦", "In development" },
     { "About", "i", "Status" },
   }
   for index, def in ipairs(menuDefs) do
     pages[def[1]] = nav:Page({ Id = "fsk_" .. def[1]:lower(), Name = def[1],
       Icon = def[2], Tooltip = def[3], Order = index })
   end
-  pages.ESP:Select()
-  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Items" } })
+  pages.Visual:Select()
 
-  local pSec = espTabs.Players:Section({ Name = "Players" })
+  -- Visual / Players (+ alert + glow, as before)
+  local visTabs = pages.Visual:SubTabs({ { Name = "Players" }, { Name = "Items" }, { Name = "Other" } })
+  local pSec = visTabs.Players:Section({ Name = "Players" })
   pSec:Paragraph("Killer = red (250+ HP rule). Everyone else = survivor purple.")
   if not HAS_DRAWING then
     pSec:Paragraph("WARNING: this executor has no Drawing API. Glow (Highlight) still works.")
@@ -942,33 +1507,112 @@ return function(api)
   flagSlider(pSec, "Range", "esp_range", 200, 6000, { suf = "m" })
   flagColor(pSec, "Killer color", "esp_killercol")
   flagColor(pSec, "Survivor color", "esp_survcol")
-  local alSec = espTabs.Players:Section({ Name = "Killer alert" })
-  alSec:Paragraph("Quiet dot under the crosshair + distance in About while the killer is close.")
+  local alSec = visTabs.Players:Section({ Name = "Killer alert" })
+  alSec:Paragraph("Popup notification when the killer gets close (10s cooldown).")
   flagToggle(alSec, "Killer alert", "alert_on")
   flagSlider(alSec, "Alert range", "alert_range", 50, 1000, { suf = "m" })
-  local gSec = espTabs.Players:Section({ Name = "Glow" })
+  local gSec = visTabs.Players:Section({ Name = "Glow" })
   gSec:Paragraph("Client-side Highlights (see-through chams).")
   flagToggle(gSec, "Killer glow", "glow_killer")
   flagToggle(gSec, "Survivor glow", "glow_surv")
   flagToggle(gSec, "Through walls", "glow_top")
   flagColor(gSec, "Killer glow", "glow_killercol")
   flagColor(gSec, "Survivor glow", "glow_survcol")
-  local iSec = espTabs.Items:Section({ Name = "Items" })
+
+  -- Visual / Items (as before)
+  local iSec = visTabs.Items:Section({ Name = "Items" })
   iSec:Paragraph("Medkits + Bloxy Cola, on the map and dropped.")
   flagToggle(iSec, "Item ESP", "item_on")
   flagToggle(iSec, "Names", "item_names")
   flagSlider(iSec, "Max distance", "item_range", 200, 6000, { suf = "m" })
   flagColor(iSec, "Color", "item_col")
-  local genSec = espTabs.Items:Section({ Name = "Generators" })
-  genSec:Paragraph("Generator objectives, nearest-first.")
+  local genSec = visTabs.Items:Section({ Name = "Generators" })
+  genSec:Paragraph("Generator objectives, nearest-first. Done ones glow green.")
   flagToggle(genSec, "Generator ESP", "gen_on")
   flagToggle(genSec, "Names", "gen_names")
   flagSlider(genSec, "Max distance", "gen_range", 200, 8000, { suf = "m" })
   flagColor(genSec, "Color", "gen_col")
 
-  local fixSec = pages.Fix:Section({ Name = "Repair" })
-  fixSec:Paragraph("Manual only now: automated repair calls (button, B key, aura) are REMOVED — the server kicks (267) for any automated RF/RE, even point-blank. Hold E yourself; the solver below plays the minigame for you.")
-  local flowSec = pages.Fix:Section({ Name = "Minigame solver" })
+  -- Visual / Other
+  local oSec = visTabs.Other:Section({ Name = "Traps & graffiti" })
+  oSec:Paragraph("Taph tripwires/tripmines, Azure bulbs/vines, Veeronica wall graffiti.")
+  flagToggle(oSec, "Veeronica graffiti", "o_graffiti")
+  flagColor(oSec, "Graffiti color", "o_graffiti_col")
+  flagToggle(oSec, "Taph traps", "o_taph")
+  flagColor(oSec, "Taph color", "o_taph_col")
+  flagToggle(oSec, "Azure plants", "o_azure")
+  flagColor(oSec, "Azure color", "o_azure_col")
+  flagToggle(oSec, "Show Azure attack radius", "azure_radius_on",
+    nil, "Draws the trigger circle around Azure plants")
+  flagSlider(oSec, "Azure radius", "azure_radius", 5, 40, { suf = "m",
+    tip = "Seeker Bulb triggers at ~19m" })
+  local oSec2 = visTabs.Other:Section({ Name = "Ritual, builds, fakes" })
+  oSec2:Paragraph("Two-Time ritual point, Builderman sentries/dispensers, Noli fake generators.")
+  flagToggle(oSec2, "Two-Time ritual", "o_ritual")
+  flagColor(oSec2, "Ritual color", "o_ritual_col")
+  flagToggle(oSec2, "Builderman builds", "o_build")
+  flagColor(oSec2, "Build color", "o_build_col")
+  flagToggle(oSec2, "Mark suspect fake gens", "o_fake", nil,
+    "Noli rounds spawn 2 fake gens (7 total). Gens past the count below get ?FAKE tags")
+  flagSlider(oSec2, "Real gen count", "fake_realcount", 3, 7, {
+    tip = "Normally 5 real gens; Noli adds 2 fakes" })
+  flagColor(oSec2, "Fake color", "o_fake_col")
+
+  -- Stamina / Survivor + Killer
+  local stamTabs = pages.Stamina:SubTabs({ { Name = "Survivor" }, { Name = "Killer" } })
+  local function stamPage(tab, role, title)
+    local onKey = role == "killer" and "stam_killer_on" or "stam_surv_on"
+    local maxKey = role == "killer" and "stam_killer_max" or "stam_surv_max"
+    local spdKey = role == "killer" and "stam_killer_speed" or "stam_surv_speed"
+    local regKey = role == "killer" and "stam_killer_regen" or "stam_surv_regen"
+    local sec = tab:Section({ Name = title })
+    sec:Paragraph("Edits the game's sprint table (snapshotted, restored on off/unload). Sliders are % of the game's own values; 0 = leave that stat alone. Enable the tab matching your current role.")
+    sec:Toggle({ Name = "Infinite stamina (no drain)", Default = F[onKey] == true,
+      Flag = "fs_" .. onKey, Callback = function(v) F[onKey] = v == true end })
+    sec:Slider({ Name = "Max stamina %", Min = 0, Max = 200, Default = F[maxKey],
+      Suffix = "%", Flag = "fs_" .. maxKey,
+      Callback = function(v) F[maxKey] = tonumber(v) or 0 end })
+    sec:Slider({ Name = "Move speed %", Min = 0, Max = 200, Default = F[spdKey],
+      Suffix = "%", Flag = "fs_" .. spdKey,
+      Callback = function(v) F[spdKey] = tonumber(v) or 0 end })
+    sec:Slider({ Name = "Regen rate %", Min = 0, Max = 200, Default = F[regKey],
+      Suffix = "%", Flag = "fs_" .. regKey,
+      Callback = function(v) F[regKey] = tonumber(v) or 0 end })
+    sec:Button({ Name = "Reset stamina", Variant = "ghost",
+      Tooltip = "Back to game defaults (keeps the toggle state)",
+      Callback = function() stamResetRole(role) end })
+  end
+  stamPage(stamTabs.Survivor, "surv", "Survivor stamina")
+  stamPage(stamTabs.Killer, "killer", "Killer stamina")
+
+  -- GenFix
+  local gfSec = pages.GenFix:Section({ Name = "Auto repair" })
+  gfSec:Paragraph("WARNING: the server has kicked (267) for repair automation before. This fires the game's own prompt (same as pressing the key), teleports you to the gen and lets the solver play the puzzle. OFF by default — your risk.")
+  local gfToggle = gfSec:Toggle({ Name = "Auto repair", Default = false, Flag = "fs_genfix_on",
+    Tooltip = "Enable the repair loop",
+    Callback = function(v) genfixSet(v == true, true) end })
+  flagKey(gfSec, "Auto repair key", "genfix_key", nil,
+    "Toggles auto repair with a popup"):OnPress(function()
+    genfixSet(not F.genfix_on, false)
+    pcall(function() gfToggle.Set(F.genfix_on, true) end)
+  end)
+  gfSec:Dropdown({ Name = "Target mode", Options = { "Random", "Custom" },
+    Default = F.genfix_mode, Flag = "fs_genfix_mode",
+    Tooltip = "Random = random unfinished gen; Custom = the one picked below",
+    Callback = function(v) F.genfix_mode = tostring(v) end })
+  genfixDD = gfSec:Dropdown({ Name = "Custom generator", Options = genfixNames,
+    Flag = "fs_genfix_custom",
+    Callback = function(v) F.genfix_custom = tostring(v) end })
+  gfSec:Button({ Name = "Refresh generator list", Variant = "ghost", Callback = function()
+    refreshGenList()
+    Notify("GenFix", #genfixNames .. " unfinished gens", "info")
+  end })
+  flagSlider(gfSec, "Cycle rate", "genfix_rate", 0.25, 5, { dec = 2, suf = "s",
+    tip = "Pause between repair attempts" })
+  flagToggle(gfSec, "Hide generator UI", "genfix_hideui", nil,
+    "Hides the puzzle/minigame frames while repairing (restored after)")
+  genfixStatus = gfSec:Label("idle")
+  local flowSec = pages.GenFix:Section({ Name = "Minigame solver" })
   flowSec:Paragraph("Auto-solves the generator flow puzzle when it pops up. Hooks the game's solver table (restored on unload).")
   flowSec:Toggle({ Name = "Auto-solve flow puzzle", Default = F.flow_on == true, Flag = "fs_flow_on",
     Tooltip = "Arms the solver hook on enable",
@@ -980,24 +1624,100 @@ return function(api)
     tip = "Pause between path nodes — 0 = instant (kick risk)" })
   flagSlider(flowSec, "Line pause", "flow_line", 0, 2, { dec = 1, suf = "s",
     tip = "Pause between solved lines — 0 = instant (kick risk)" })
-  local stamSec = pages.Fix:Section({ Name = "Stamina" })
-  stamSec:Paragraph("Zeroes stamina drain via the game's sprint table. Restored on off/unload.")
-  flagToggle(stamSec, "Infinite stamina", "stam_on")
 
+  -- Antis
+  local antiTabs = pages.Antis:SubTabs({ { Name = "Movement" }, { Name = "Debuffs" }, { Name = "Exploits" } })
+  local amSec = antiTabs.Movement:Section({ Name = "Status cleanse" })
+  amSec:Paragraph("Strips slow/stun/root markers off your character 4x/sec. Client-side: the server re-applies them, so this fights what your client enforces.")
+  flagToggle(amSec, "Anti slow", "anti_slow")
+  flagToggle(amSec, "Anti stun", "anti_stun")
+  flagToggle(amSec, "Anti root / grab", "anti_root")
+  local adSec = antiTabs.Debuffs:Section({ Name = "Screen effects" })
+  adSec:Paragraph("Hides low-HP vignette, glitch/hallucination overlays and similar screen junk + Lighting post-effects. Everything is tracked and restored on off/unload.")
+  adSec:Toggle({ Name = "Hide screen-effect GUIs", Default = F.deb_gui == true,
+    Flag = "fs_deb_gui", Callback = function(v)
+      F.deb_gui = v == true
+      guarded("deb", function() debApplyGui(F.deb_gui) end)
+    end })
+  local adSec2 = antiTabs.Debuffs:Section({ Name = "Post-processing" })
+  adSec2:Toggle({ Name = "Disable Lighting effects", Default = F.deb_post == true,
+    Desc = "Blur / color correction / sun rays off while on", Flag = "fs_deb_post",
+    Callback = function(v)
+      F.deb_post = v == true
+      guarded("deb", function() debApplyPost(F.deb_post) end)
+    end })
+  local axSec = antiTabs.Exploits:Section({ Name = "Passages & traps" })
+  axSec:Paragraph("Killer-door phase walks you through killer-only barriers (client collision). Taph immunity suppresses local trap touch — the server may still register the trigger.")
+  axSec:Toggle({ Name = "Phase killer doors", Default = F.x_doors == true,
+    Flag = "fs_x_doors", Callback = function(v)
+      F.x_doors = v == true
+      guarded("doors", function() doorsApply(F.x_doors) end)
+    end })
+  axSec:Toggle({ Name = "Taph trap immunity", Default = F.x_trapimmune == true,
+    Flag = "fs_x_trapimmune",
+    Tooltip = "Local touch suppression only — server may still trigger",
+    Callback = function(v)
+      F.x_trapimmune = v == true
+      guarded("traps", function() trapsApply(F.x_trapimmune) end)
+    end })
+
+  -- AimBot
+  local abSec = pages.AimBot:Section({ Name = "Aim" })
+  abSec:Paragraph("Camera aim at the closest target near your crosshair. Client-side.")
+  local abToggle = abSec:Toggle({ Name = "Aimbot", Default = false, Flag = "fs_aim_on",
+    Callback = function(v) aimSet(v == true, true) end })
+  flagKey(abSec, "Aimbot key", "aim_key", nil, "Toggles aim with a popup"):OnPress(function()
+    aimSet(not F.aim_on, false)
+    pcall(function() abToggle.Set(F.aim_on, true) end)
+  end)
+  abSec:Dropdown({ Name = "Target", Options = { "Killer", "Survivors" },
+    Default = F.aim_target, Flag = "fs_aim_target",
+    Callback = function(v) F.aim_target = tostring(v) end })
+  abSec:Dropdown({ Name = "Aim part", Options = { "Head", "Torso", "HRP" },
+    Default = F.aim_part, Flag = "fs_aim_part",
+    Callback = function(v) F.aim_part = tostring(v) end })
+  flagSlider(abSec, "Smoothness", "aim_smooth", 1, 30, { tip = "Higher = slower, more legit" })
+  flagSlider(abSec, "FOV", "aim_fov", 50, 1000, { suf = "px" })
+
+  -- AutoCombat (UI only)
+  local acTabs = pages.AutoCombat:SubTabs({ { Name = "Survivors" }, { Name = "Killer" } })
+  local function acPage(tab, role, modes)
+    local sec = tab:Section({ Name = (role == "killer" and "Killer" or "Survivor") .. " combat" })
+    sec:Paragraph("Under construction: layout preview only, nothing here acts yet.")
+    sec:Dropdown({ Name = "Mode", Options = modes, Default = modes[1],
+      Flag = "fs_ac_" .. role .. "_mode",
+      Callback = function(v) F["ac_" .. role .. "_mode"] = tostring(v) end })
+    sec:Slider({ Name = "React range", Min = 5, Max = 100, Default = 25, Suffix = "m",
+      Flag = "fs_ac_" .. role .. "_range", Callback = function() end })
+    sec:Slider({ Name = "Cooldown", Min = 0, Max = 5, Default = 1, Decimals = 2, Suffix = "s",
+      Flag = "fs_ac_" .. role .. "_cd", Callback = function() end })
+    local enT
+    enT = sec:Toggle({ Name = "Enable (soon)", Default = false,
+      Callback = function(v)
+        if v then
+          pcall(function() enT.Set(false, true) end)
+          Notify("AutoCombat", "Not implemented yet — UI preview only", "warn")
+        end
+      end })
+  end
+  acPage(acTabs.Survivors, "surv", { "Assist", "Peel killer", "Bodyguard" })
+  acPage(acTabs.Killer, "killer", { "Assist", "Focus weakest", "Zone control" })
+
+  -- About
   local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("FORSAKEN - hub module v" .. MODULE_VERSION)
-  aboutSec:Paragraph("Killer/survivor ESP + items + generators + minigame solver + stamina. Eyes-only: no repair remotes are ever sent.")
+  aboutSec:Paragraph("Visual + stamina + GenFix + antis + aimbot. Eyes-only except client stamina/collision/camera and GenFix prompt firing.")
   statLbl = aboutSec:Label("players 0 · killers 0")
   dbgLbl = aboutSec:Label("loop - fps")
   aboutSec:Button({ Name = "Rebuild overlays", Variant = "ghost", Callback = function()
     freeTransient()
-    for _, maps in ipairs({ genMap, itemMap }) do
+    for _, maps in ipairs({ genMap, itemMap, otherMap }) do
       for m, o in pairs(maps) do
         if o.lbl then pcall(function() o.lbl:Remove() end) end
         maps[m] = nil
       end
     end
-    for _, cache in ipairs({ genCache, itemCache }) do
+    for _, cache in ipairs({ genCache, itemCache, otherCache }) do
       for _, entry in ipairs(cache) do entry.lbl = nil end
     end
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
