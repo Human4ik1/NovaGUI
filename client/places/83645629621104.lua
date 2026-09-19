@@ -65,7 +65,7 @@ return function(api)
     o_ritual = false, o_ritual_col = Color3.fromRGB(255, 255, 255),
     o_build = false, o_build_col = Color3.fromRGB(255, 80, 0),
     o_fake = false, o_fake_col = Color3.fromRGB(120, 0, 200),
-    fake_realcount = 5,
+    fake_realcount = 5, other_range = 2500, other_extra = "",
     -- Stamina (per role; same sprint table underneath)
     stam_surv_on = false, stam_surv_max = 100, stam_surv_speed = 0,
     stam_surv_regen = 0,
@@ -323,12 +323,60 @@ return function(api)
   -- --------------------------------------------------------------------------
   local glowMap, glowSeenT = {}, {}
   local glowIds, glowNext = setmetatable({}, { __mode = "k" }), 0
-  local function glowKey(o, tag)
+  -- highlights go stale (round transitions, streaming races: present and
+  -- enabled, but rendering nothing — seen live on Amur). Track birth time
+  -- per key and force-recreate anything older than HL_MAXAGE.
+  local hlBorn = {}
+  local HL_MAXAGE = 25
+  local function modelHasParts(model)
+    local found = false
+    pcall(function()
+      for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("BasePart") then found = true break end
+      end
+    end)
+    return found
+  end  local function glowKey(o, tag)
     if not glowIds[o] then glowNext = glowNext + 1; glowIds[o] = glowNext end
     return tag .. "_" .. glowIds[o]
   end
   local GLOW_ENTITY_CAP, GLOW_LOOT_CAP = 20, 10
   local glowUsedEntity, glowUsedLoot = 0, 0
+  -- Transparent rigs (1x1x1x1, crouched Two-Time, ghostly Noobs): the
+  -- Highlight renderer skips fully-transparent parts, so glow looks dead.
+  -- While a model is glowed we pin its see-through parts to 0.25 and
+  -- restore every saved value on unglow/unload. Client-side only.
+  local transSaved, transT = {}, {}
+  local TRANS_FIX_T, TRANS_FIX_SET = 0.75, 0.25
+  local function transClamp(model, key, now)
+    if transSaved[key] and (transT[key] or 0) > now - 0.5 then return end
+    transT[key] = now
+    local saved = transSaved[key] or {}
+    transSaved[key] = saved
+    local ok, desc = pcall(function() return model:GetDescendants() end)
+    if not ok then return end
+    for _, p in ipairs(desc) do
+      local okB, isBase = pcall(function() return p:IsA("BasePart") end)
+      if okB and isBase then
+        pcall(function()
+          if p.Transparency > TRANS_FIX_T then
+            if saved[p] == nil then saved[p] = p.Transparency end
+            p.Transparency = TRANS_FIX_SET
+          end
+        end)
+      end
+    end
+  end
+  local function transRestore(key)
+    local saved = transSaved[key]
+    transSaved[key] = nil
+    transT[key] = nil
+    if saved then
+      for part, t in pairs(saved) do
+        pcall(function() if part.Parent then part.Transparency = t end end)
+      end
+    end
+  end
   local function setGlow(model, col, on, tag, pool)
     if not model or not model.Parent then return end
     local key = glowKey(model, tostring(tag))
@@ -337,19 +385,33 @@ return function(api)
       if prev then pcall(function() prev:Destroy() end) end
       glowMap[key] = nil
       glowSeenT[key] = nil
+      hlBorn[key] = nil
+      transRestore(key)
       return
     end
     local isLoot = pool == "loot"
     if prev and prev.Parent then
-      glowSeenT[key] = os.clock()
-      if isLoot then glowUsedLoot = glowUsedLoot + 1
-      else glowUsedEntity = glowUsedEntity + 1 end
-      pcall(function()
-        if prev.FillColor ~= col then prev.FillColor = col end
-        prev.DepthMode = F.glow_top and Enum.HighlightDepthMode.AlwaysOnTop
-          or Enum.HighlightDepthMode.Occluded
-      end)
-      return
+      if os.clock() - (hlBorn[key] or os.clock()) > HL_MAXAGE then
+        -- stale: renders nothing (round/streaming race). Drop it; the
+        -- creation path below rebuilds it on the next frame.
+        pcall(function() prev:Destroy() end)
+        glowMap[key] = nil
+        glowSeenT[key] = nil
+        hlBorn[key] = nil
+        transRestore(key)
+        prev = nil
+      else
+        glowSeenT[key] = os.clock()
+        if isLoot then glowUsedLoot = glowUsedLoot + 1
+        else glowUsedEntity = glowUsedEntity + 1 end
+        pcall(function()
+          if prev.FillColor ~= col then prev.FillColor = col end
+          prev.DepthMode = F.glow_top and Enum.HighlightDepthMode.AlwaysOnTop
+            or Enum.HighlightDepthMode.Occluded
+        end)
+        transClamp(model, key, os.clock())
+        return
+      end
     end
     if isLoot then
       if glowUsedLoot >= GLOW_LOOT_CAP then return end
@@ -359,6 +421,9 @@ return function(api)
       glowUsedEntity = glowUsedEntity + 1
     end
     local ok, hl = pcall(function()
+      -- never plant a highlight on an empty (still streaming) model: it
+      -- comes out stillborn and renders nothing until recreated
+      if not modelHasParts(model) then return nil end
       local h = Instance.new("Highlight")
       h.Name = "ForsakenFX"
       h.Adornee = model
@@ -372,7 +437,11 @@ return function(api)
       return h
     end)
     glowMap[key] = (ok and hl) or nil
-    if glowMap[key] then glowSeenT[key] = os.clock() end
+    if glowMap[key] then
+      glowSeenT[key] = os.clock()
+      hlBorn[key] = os.clock()
+    end
+    transClamp(model, key, os.clock())
   end
   local function gcGlow(seen, stamp)
     local now = stamp or os.clock()
@@ -385,6 +454,8 @@ return function(api)
           pcall(function() h:Destroy() end)
           glowMap[k] = nil
           glowSeenT[k] = nil
+          hlBorn[k] = nil
+          transRestore(k)
         end
       end
     end
@@ -401,22 +472,49 @@ return function(api)
     local ig = mf and mf:FindFirstChild("Ingame")
     return ig and ig:FindFirstChild("Map") or nil
   end
-  -- name patterns for the Other tab (lowercase substrings)
+  -- name patterns for the Other tab (lowercase substrings).
+  -- Deliberately NARROW: bare words like "plant"/"vine"/"bulb" match map
+  -- decor (bushes, wall vines) and flood the screen. Extra per-map words
+  -- go into F.other_extra (comma-separated TextBox in the UI).
   local OTHER_PATTERNS = {
-    graffiti = { "graffiti", "veeronica", "spray", "tag" },
-    taph = { "tripwire", "tripmine", "subspacetripmine", "subspace tripmine", "taph" },
-    azure = { "seeker", "bulb", "secretbulb", "stigmatize", "vine", "azure", "plant", "golem", "atropa" },
+    graffiti = { "graffiti", "veeronica" },
+    taph = { "tripwire", "tripmine", "subspacetripmine", "subspace tripmine" },
+    azure = { "seeker", "secretbulb", "seeker bulb", "stigmatize", "azure" },
     ritual = { "ritual", "twotime", "two time", "two-time", "oblation" },
-    build = { "buildermansentry", "buildermandispenser", "sentry", "dispenser" },
+    build = { "buildermansentry", "buildermandispenser" },
   }
-  local function otherKind(name)
+  local function otherKind(name, extra)
     local low = string.lower(tostring(name))
     for kind, pats in pairs(OTHER_PATTERNS) do
       for _, p in ipairs(pats) do
         if string.find(low, p, 1, true) then return kind end
       end
     end
+    if type(extra) == "table" then
+      for kind, words in pairs(extra) do
+        for _, w in ipairs(words) do
+          if w ~= "" and string.find(low, w, 1, true) then return kind end
+        end
+      end
+    end
     return nil
+  end
+  local function otherExtra()
+    -- { kind = {words} } parsed from the UI textbox ("kind:word, kind:word")
+    local out = {}
+    pcall(function()
+      for chunk in string.gmatch(string.lower(tostring(F.other_extra or "")), "[^,]+") do
+        local kind, word = chunk:match("^%s*(%a+)%s*:%s*(.+)%s*$")
+        if kind and word then
+          word = word:gsub("%s+$", "")
+          if OTHER_PATTERNS[kind] and word ~= "" then
+            out[kind] = out[kind] or {}
+            table.insert(out[kind], word)
+          end
+        end
+      end
+    end)
+    return out
   end
   local function scanWorld()
     local gens, items, other, seen = {}, {}, {}, {}
@@ -471,10 +569,11 @@ return function(api)
       if ig then
         local ok, desc = pcall(function() return ig:GetDescendants() end)
         if ok then
+          local extra = otherExtra()
           for _, v in ipairs(desc) do
             if moduleDead then return end
             if not seen[v] and (v:IsA("Model") or v:IsA("BasePart")) then
-              local kind = otherKind(v.Name)
+              local kind = otherKind(v.Name, extra)
               if kind and not itemHeld(v) then
                 -- skip parts buried inside already-tracked gens/items
                 local pos = partPos(v)
@@ -548,7 +647,7 @@ return function(api)
     end
     sync(genCache, genMap, (F.gen_on and F.gen_names) == true, F.gen_range, 13)
     sync(itemCache, itemMap, (F.item_on and F.item_names) == true, F.item_range, 12)
-    sync(otherCache, otherMap, true, 6000, 12)
+    sync(otherCache, otherMap, true, tonumber(F.other_range) or 2500, 12)
   end
   local function genProgress(e)
     if e.prog and e.prog.Parent then
@@ -1108,6 +1207,7 @@ return function(api)
   -- --------------------------------------------------------------------------
   local statLbl, dbgLbl, antiTick, stamTick2, utilTick = nil, nil, 0, 0, 0
   local statTick, scanTick, labelTick, nP, nK = 0, 0, 0, 0, 0
+  local nGlowK, nGlowS = 0, 0
   local killerNear, killerDist = false, math.huge
 
   -- --------------------------------------------------------------------------
@@ -1145,6 +1245,7 @@ return function(api)
             local key = glowKey(ch, killer and "k" or "s")
             setGlow(ch, gcol, true, killer and "k" or "s")
             seenGlow[key] = true
+            if killer then nGlowK = nGlowK + 1 else nGlowS = nGlowS + 1 end
           end
           if not F.esp_box and not F.esp_health and not F.esp_name and not F.esp_dist then
             hideRig(e) return
@@ -1251,13 +1352,14 @@ return function(api)
       draw(itemCache, F.item_on == true, F.item_names == true, F.item_col, "i")
       -- Other: per-kind flags + fake-gen suspects (Noli rounds: more
       -- gens than realCount => extras marked "?FAKE")
-      local realN = tonumber(F.fake_realcount) or 5
-      for _, e in ipairs(otherCache) do
-        local L = e.lbl
-        if L then L.Visible = false end
-        if e.m.Parent and e.pos and otherActive(e.kind) then
-          local d = (mp - e.pos).Magnitude
-          if d == d and d <= 6000 then
+          local realN = tonumber(F.fake_realcount) or 5
+          local oRange = tonumber(F.other_range) or 2500
+          for _, e in ipairs(otherCache) do
+            local L = e.lbl
+            if L then L.Visible = false end
+            if e.m.Parent and e.pos and otherActive(e.kind) then
+              local d = (mp - e.pos).Magnitude
+              if d == d and d <= oRange then
             local sp, heard = wts(e.pos)
             if L and heard and onScreenPt(sp, vs) then
               L.Text = e.name .. "  " .. math.floor(d + 0.5) .. "m"
@@ -1285,32 +1387,36 @@ return function(api)
           end
         end
       end
-      -- Azure vine attack radius (19m default, adjustable)
-      if F.o_azure and F.azure_radius_on then
-        for _, e in ipairs(otherCache) do
-          if e.kind == "azure" and e.m.Parent and e.pos then
-            local d = (mp - e.pos).Magnitude
-            if d == d and d <= 6000 then
-              guarded("azure", function()
-                local c = tshape("Circle")
-                local sp, heard = wts(e.pos)
-                if heard and onScreenPt(sp, vs, 400) then
-                  local scale = 800 / math.max((camera.CFrame.Position - e.pos).Magnitude, 1)
-                  c.Color = F.o_azure_col
-                  c.Transparency = 0.5
-                  c.Filled = false
-                  c.Thickness = 1
-                  c.NumSides = 32
-                  c.Radius = (tonumber(F.azure_radius) or 19) * scale * 4
-                  c.Position = V2(sp.X, sp.Y)
-                else
-                  c.Visible = false
+          -- Azure vine attack radius (19m default, adjustable).
+          -- Real screen projection: px = R * (H/2) / (D * tan(fov/2)).
+          if F.o_azure and F.azure_radius_on then
+            local fov = 70
+            pcall(function() fov = camera.FieldOfView end)
+            local proj = (vs.Y * 0.5) / math.max(math.tan(math.rad(fov) / 2), 0.01)
+            for _, e in ipairs(otherCache) do
+              if e.kind == "azure" and e.m.Parent and e.pos then
+                local d = (mp - e.pos).Magnitude
+                if d == d and d <= oRange then
+                  guarded("azure", function()
+                    local c = tshape("Circle")
+                    local sp, heard = wts(e.pos)
+                    if heard and onScreenPt(sp, vs, 400) then
+                      local dist = math.max((camera.CFrame.Position - e.pos).Magnitude, 1)
+                      c.Color = F.o_azure_col
+                      c.Transparency = 0.5
+                      c.Filled = false
+                      c.Thickness = 1
+                      c.NumSides = 32
+                      c.Radius = clamp((tonumber(F.azure_radius) or 19) * proj / dist, 4, vs.Y)
+                      c.Position = V2(sp.X, sp.Y)
+                    else
+                      c.Visible = false
+                    end
+                  end)
                 end
-              end)
+              end
             end
           end
-        end
-      end
       -- glow pass, nearest-first (caches are sorted)
       local shown = 0
       local cap = GLOW_LOOT_CAP
@@ -1365,7 +1471,8 @@ return function(api)
     if statLbl and now - statTick > 2 then
       statTick = now
       pcall(function()
-        statLbl.Set(("players %d · killers %d%s%s%s"):format(nP, nK,
+        statLbl.Set(("players %d · killers %d · glow K%d/S%d%s%s%s"):format(nP, nK,
+          nGlowK, nGlowS,
           (F.alert_on and killerNear) and (" · KILLER " .. math.floor(killerDist + 0.5) .. "m") or "",
           #genCache > 0 and (" · gens " .. #genCache) or "",
           #otherCache > 0 and (" · other " .. #otherCache) or ""))
@@ -1406,6 +1513,7 @@ return function(api)
       local seenGlow = {}
       glowUsedEntity, glowUsedLoot = 0, 0
       nP, nK = 0, 0
+      nGlowK, nGlowS = 0, 0
       killerNear, killerDist = false, math.huge
       framePlayers(meHRP, vs, seenGlow)
       frameWorld(meHRP, vs, seenGlow)
@@ -1435,6 +1543,8 @@ return function(api)
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for k in pairs(glowSeenT) do glowSeenT[k] = nil end
+    for k in pairs(transSaved) do transRestore(k) end
+    for k in pairs(hlBorn) do hlBorn[k] = nil end
     for pl in pairs(pesc) do freeRig(pl) end
     for _, maps in ipairs({ genMap, itemMap, otherMap }) do
       for m, o in pairs(maps) do
@@ -1557,6 +1667,12 @@ return function(api)
   flagSlider(oSec2, "Real gen count", "fake_realcount", 3, 7, {
     tip = "Normally 5 real gens; Noli adds 2 fakes" })
   flagColor(oSec2, "Fake color", "o_fake_col")
+  flagSlider(oSec2, "Other max distance", "other_range", 200, 6000, { suf = "m",
+    tip = "Labels + azure circles past this are hidden" })
+  oSec2:TextBox({ Name = "Extra filters", Placeholder = "kind:word, e.g. azure:vine",
+    Default = F.other_extra, Flag = "fs_other_extra",
+    Tooltip = "kind = graffiti/taph/azure/ritual/build. Appended to the built-in name list",
+    Callback = function(v) F.other_extra = tostring(v or "") end })
 
   -- Stamina / Survivor + Killer
   local stamTabs = pages.Stamina:SubTabs({ { Name = "Survivor" }, { Name = "Killer" } })
@@ -1723,6 +1839,8 @@ return function(api)
     for _, h in pairs(glowMap) do pcall(function() h:Destroy() end) end
     for k in pairs(glowMap) do glowMap[k] = nil end
     for k in pairs(glowSeenT) do glowSeenT[k] = nil end
+    for k in pairs(transSaved) do transRestore(k) end
+    for k in pairs(hlBorn) do hlBorn[k] = nil end
     HAS_DRAWING = pcall(function() local probe = Drawing.new("Square"); probe:Remove() end)
     guarded("labels", syncLabelMaps)
     Notify("Forsaken", HAS_DRAWING and "Overlays rebuilt" or "Drawing API unavailable", HAS_DRAWING and "ok" or "warn")
