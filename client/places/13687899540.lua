@@ -28,6 +28,7 @@
 
 return function(api)
   local Tab, Notify = api.Tab, api.Notify
+  local MODULE_VERSION = "3.0-antitp"
 
   local runService = game:GetService("RunService")
   local players = game:GetService("Players")
@@ -45,7 +46,7 @@ return function(api)
   end
 
   local M = {}
-  M.version = "hub-3"
+  M.version = MODULE_VERSION
   M.flags = {}
   M.errors = {}
   M.marks = {} -- session waypoints (visual only, never teleported to)
@@ -1346,7 +1347,7 @@ return function(api)
 
   -- ABOUT --
   local aboutSec = pages.About:Section({ Name = "About" })
-  aboutSec:Label("COLD WAR · hub module (engine v3)")
+  aboutSec:Label("COLD WAR - hub module v" .. MODULE_VERSION)
   aboutSec:Paragraph("NATO/PACT auto-teams · R6 · BallisticsNet fire · objective intel. No teleports — anti-teleport safe. Persistence via hub Settings → Config.")
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
@@ -1502,6 +1503,6 @@ return function(api)
     getgenv().__HUMA_PLACE = hub -- generic contract: hub unloads the place module
   end) end
 
-  notify("Cold War loaded — Alt frees the mouse, RightShift toggles the hub")
-  print("[huma-coldwar] place module loaded")
+  notify("Cold War loaded v" .. MODULE_VERSION .. " — Alt frees the mouse, RightShift toggles the hub")
+  print("[huma-coldwar] place module loaded v" .. MODULE_VERSION)
 end
