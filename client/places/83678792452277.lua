@@ -7,6 +7,11 @@
     - parry swing = ReplicatedStorage._SwordVFXAcquire:InvokeServer({sword, finisher})
       + _SwordVFXRelease:FireServer on swing end (only traffic a swing makes;
       server judges the deflect itself, ParrySuccess* are server->client);
+    - ball mesh is NEVER exposed client-side: tracked via workspace.FX
+      BallShadow (only moving anchored part, ~94st/s in flight). Timing uses
+      shadow XZ distance + closing trend + manual velocity; ball height unknown;
+    - game state = require(ReplicatedStorage.Values): GAME_STATE (Started?),
+      CURRENT_BALL_ID, PLAYER_ACTIVE_STATE, IS_READY;
     - live parry state = LocalPlayer attribute isDeflecting (bool);
     - HUD: HUD.HolderBottom.ToolbarButtons.{DeflectButton(F), DashButton(Q),
       AbilityButton1..4(keys 1-4)}, each with a Cooldown frame;
@@ -142,6 +147,11 @@ return function(api)
     return ok and v == true
   end
 
+  -- Ball tracking: the real ball mesh is never exposed client-side (server
+  -- only). The game replicates its ground projection as workspace.FX
+  -- BallShadow — the only anchored part that moves (verified: 94st in 1s
+  -- during flight). All parry timing runs off the shadow: XZ distance,
+  -- closing trend, manual velocity.
   local ballCache, ballCacheT = nil, 0
   local function findBall()
     local now = os.clock()
@@ -152,13 +162,18 @@ return function(api)
     ballCacheT = now
     local best, bestSpd = nil, 3
     pcall(function()
-      for _, d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("BasePart") then
-          local n = tostring(d.Name):lower()
-          if n == "ball" or n:find("death ball", 1, true) then
-            local ok, v = pcall(function() return d.AssemblyLinearVelocity end)
-            local spd = (ok and v) and v.Magnitude or 0
-            if spd >= bestSpd then best, bestSpd = d, spd end
+      local fx = workspace:FindFirstChild("FX")
+      local sh = fx and fx:FindFirstChild("BallShadow")
+      if sh and sh:IsA("BasePart") then best = sh end
+      if not best then
+        for _, d in ipairs(workspace:GetDescendants()) do
+          if d:IsA("BasePart") then
+            local n = tostring(d.Name):lower()
+            if n == "ball" or n:find("death ball", 1, true) then
+              local ok, v = pcall(function() return d.AssemblyLinearVelocity end)
+              local spd = (ok and v) and v.Magnitude or 0
+              if spd >= bestSpd then best, bestSpd = d, spd end
+            end
           end
         end
       end
@@ -166,18 +181,53 @@ return function(api)
     ballCache = best
     return best
   end
-  local lastBallDist = nil
+  local lastBallDist, lastBallPos, lastBallT, smoothSpd = nil, nil, 0, 0
   local function ballThreat(maxDist)
     local ball = findBall()
     local hrp = getHRP()
-    if not ball or not hrp then lastBallDist = nil return nil end
-    local d = (ball.Position - hrp.Position).Magnitude
+    if not ball or not hrp then
+      lastBallDist, lastBallPos, smoothSpd = nil, nil, 0
+      return nil
+    end
+    local now = os.clock()
+    local bp = ball.Position
+    local dx, dz = bp.X - hrp.Position.X, bp.Z - hrp.Position.Z
+    local d = math.sqrt(dx * dx + dz * dz) -- horizontal: height unknown via shadow
     local closing = lastBallDist ~= nil and d < lastBallDist - 0.05
     lastBallDist = d
+    if lastBallPos and now - lastBallT > 0.001 then
+      local inst = (bp - lastBallPos).Magnitude / (now - lastBallT)
+      smoothSpd = smoothSpd * 0.7 + math.min(inst, 400) * 0.3
+    end
+    lastBallPos, lastBallT = bp, now
     if d > maxDist then return nil end
-    local ok, v = pcall(function() return ball.AssemblyLinearVelocity end)
-    local spd = (ok and v) and v.Magnitude or 0
-    return { ball = ball, dist = d, speed = spd, closing = closing, hrp = hrp }
+    return { ball = ball, dist = d, speed = smoothSpd, closing = closing, hrp = hrp }
+  end
+  -- Game state via the replicated Values module (round/alive/ready)
+  local valuesApi, valuesApiT = nil, 0
+  local function gameValues()
+    if valuesApi and os.clock() - valuesApiT < 5 then return valuesApi end
+    valuesApiT = os.clock()
+    pcall(function()
+      local v = game:GetService("ReplicatedStorage"):FindFirstChild("Values")
+      if v and v:IsA("ModuleScript") then
+        local ok, api = pcall(require, v)
+        if ok and type(api) == "table" then valuesApi = api end
+      end
+    end)
+    return valuesApi
+  end
+  local function gameLive()
+    local api = gameValues()
+    if not api then return findBall() ~= nil end -- fallback: ball presence
+    local gs = api.GAME_STATE
+    if not gs then return findBall() ~= nil end
+    local ok, v = pcall(function()
+      if type(gs.Get) == "function" then return gs:Get() end
+      return gs.value
+    end)
+    if not ok then return findBall() ~= nil end
+    return tostring(v) == "Started"
   end
 
   local swingLock = 0
@@ -334,7 +384,7 @@ return function(api)
     readyT = readyT + dt
     if readyT < 1 then return end
     readyT = 0
-    if findBall() then return end -- round live: stay and play
+    if gameLive() then return end -- round live: stay and play
     if not readyAnchor then refreshAnchors() end
     if not readyAnchor then return end
     local hrp = getHRP()
