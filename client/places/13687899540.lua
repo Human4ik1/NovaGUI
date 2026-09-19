@@ -968,6 +968,8 @@ return function(api)
     cross_style = "cross", cross_thickness = 1, cross_gap = 4, cross_length = 7,
     cross_color = "white", cross_outline = true,
     bind_aim_key = "CapsLock", bind_aim_mode = "toggle",
+    bind_rage_key = "none", bind_rage_mode = "toggle",
+    bind_autofire_key = "none", bind_autofire_mode = "toggle",
     bind_noclip_key = "none", bind_noclip_mode = "toggle",
     bind_fly_key = "none", bind_fly_mode = "toggle",
     bind_zoom_key = "none", bind_zoom_mode = "toggle",
@@ -985,6 +987,32 @@ return function(api)
 
   M.bindDefs = {
     aim = { label = "Aim lock", keyflag = "bind_aim_key", modflag = "bind_aim_mode" },
+    rage = {
+      label = "Rage", keyflag = "bind_rage_key", modflag = "bind_rage_mode",
+      side = function(on)
+        if on and legitGuard() then
+          M.flags.aim_rage = false
+          if rageToggle then rageToggle.Set(false) end
+          return
+        end
+        M.flags.aim_rage = on
+        notify(on and "Rage ON" or "Rage OFF")
+        if rageToggle then rageToggle.Set(on) end
+      end,
+    },
+    autofire = {
+      label = "Auto fire", keyflag = "bind_autofire_key", modflag = "bind_autofire_mode",
+      side = function(on)
+        if on and legitGuard() then
+          M.flags.aim_autofire = false
+          if autoToggle then autoToggle.Set(false) end
+          return
+        end
+        M.flags.aim_autofire = on
+        notify(on and "AutoFire ON" or "AutoFire OFF")
+        if autoToggle then autoToggle.Set(on) end
+      end,
+    },
     noclip = {
       label = "Noclip", keyflag = "bind_noclip_key", modflag = "bind_noclip_mode",
       side = function(on)
@@ -1106,7 +1134,7 @@ return function(api)
 
   -- FIRE --
   local fireSec = aimTabs.Fire:Section({ Name = "Fire" })
-  fireSec:Paragraph("Rage (X) locks everything on screen and fires. Needs an equipped firearm.")
+  fireSec:Paragraph("Rage locks everything on screen and fires (fixed X, or your own key below). Needs an equipped firearm.")
   rageToggle = fireSec:Toggle({ Name = "Rage aim (X)", Default = M.flags.aim_rage == true, Flag = "cw_aim_rage",
     Callback = function(v)
       if v and legitGuard() then if rageToggle then rageToggle.Set(false) end return end
@@ -1121,6 +1149,8 @@ return function(api)
     Callback = function(v) M.flags.aim_fastzoom = v == true end })
   flagSlider(fireSec, "Fire rate", "aim_fire_rate", 5, 30, { suf = "/s" })
   flagSlider(fireSec, "Zoom FOV", "aim_zoom_fov", 5, 50)
+  bindRow(fireSec, "rage")
+  bindRow(fireSec, "autofire")
   bindRow(fireSec, "zoom")
 
   -- ESP --
@@ -1336,7 +1366,7 @@ return function(api)
 
   -- MOUSE (keybinds live next to their features now) --
   local mouseSec = pages.Safety:Section({ Name = "Mouse" })
-  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move). Fixed: Alt/Ctrl mouse · P save mark · X rage · B autofire · N/M noclip/fly.")
+  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move). Fixed: Alt/Ctrl mouse · P save mark · X rage · B autofire · N/M noclip/fly. Setting a custom key bar disables the fixed key for that action.")
   mouseSec:Toggle({ Name = "Free mouse (Alt)", Desc = "Release cursor for the hub window",
     Default = false, Callback = function(v)
       M.uiState.mouseFree = v == true
@@ -1394,7 +1424,9 @@ return function(api)
             notify("Mark saved")
           end
         end
-        if userInput:IsKeyDown(Enum.KeyCode.X) and (t - lastX) > 0.3 then
+        -- fixed X/B/N/M yield to a custom key bar on the same action (else double-toggle)
+        if (M.flags.bind_rage_key == nil or M.flags.bind_rage_key == "none")
+          and userInput:IsKeyDown(Enum.KeyCode.X) and (t - lastX) > 0.3 then
           lastX = t
           if not M.flags.aim_rage and legitGuard() then
             if rageToggle then rageToggle.Set(false) end
@@ -1404,7 +1436,8 @@ return function(api)
             notify(M.flags.aim_rage and "Rage ON" or "Rage OFF")
           end
         end
-        if userInput:IsKeyDown(Enum.KeyCode.B) and (t - lastB) > 0.3 then
+        if (M.flags.bind_autofire_key == nil or M.flags.bind_autofire_key == "none")
+          and userInput:IsKeyDown(Enum.KeyCode.B) and (t - lastB) > 0.3 then
           lastB = t
           if not M.flags.aim_autofire and legitGuard() then
             if autoToggle then autoToggle.Set(false) end
@@ -1414,7 +1447,8 @@ return function(api)
             notify(M.flags.aim_autofire and "AutoFire ON" or "AutoFire OFF")
           end
         end
-        if userInput:IsKeyDown(Enum.KeyCode.N) and (t - lastN) > 0.3 then
+        if (M.flags.bind_noclip_key == nil or M.flags.bind_noclip_key == "none")
+          and userInput:IsKeyDown(Enum.KeyCode.N) and (t - lastN) > 0.3 then
           lastN = t
           if not M.flags.misc_noclip and legitGuard() then
             if noclipToggle then noclipToggle.Set(false) end
@@ -1426,7 +1460,8 @@ return function(api)
             notify(M.flags.misc_noclip and "Noclip ON" or "Noclip OFF")
           end
         end
-        if userInput:IsKeyDown(Enum.KeyCode.M) and (t - lastM) > 0.3 then
+        if (M.flags.bind_fly_key == nil or M.flags.bind_fly_key == "none")
+          and userInput:IsKeyDown(Enum.KeyCode.M) and (t - lastM) > 0.3 then
           lastM = t
           if not M.flags.misc_fly and legitGuard() then
             if flyToggle then flyToggle.Set(false) end
