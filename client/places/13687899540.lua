@@ -1,11 +1,14 @@
 --[[
-  HumaHub place module — Cold War (PlaceId 13687899540).
+  HumaHub place module — Cold War (PlaceId 13687899540, UniverseId 4750561026).
   Repo path: client/places/13687899540.lua
+  Universe redirect: client/universes/4750561026.lua (every map funnels here).
 
   Converted from ColdWar.lua (standalone, own menu) to hub format:
     - the full engine is kept 1:1 (teams, ESP, glow, aimbot, fire packets,
       kill-all, radar, crosshair, movement, teleports, vehicles, binds);
-    - the custom menu is replaced by Nova controls on api.Tab;
+    - the custom menu is replaced by Nova controls in Delta layout:
+      Navigation → Pages (ESP/Aim/Teleport/World/Safety/About) → SubTabs;
+    - keybind bars live inside their feature sections (Aim/Fire/Move/Kill);
     - persistence now rides Nova:Save/Load (Flag = engine key), the JSON
       file is gone; kill-list/markers stay session-only.
 
@@ -37,7 +40,7 @@ return function(api)
   end
 
   local M = {}
-  M.version = "hub-1"
+  M.version = "hub-2"
   M.flags = {}
   M.errors = {}
   M.markers = {}
@@ -1164,9 +1167,32 @@ return function(api)
       Callback = function(v) M.flags[def.modflag] = tostring(v) end })
   end
 
+  -- --------------------------------------------------------------------------
+  -- Nova UI — Delta-style navigation (Pages + SubTabs, engine untouched)
+  -- --------------------------------------------------------------------------
+  local pages = {}
+  local nav = api.Navigation or Tab:Navigation({ Name = "Cold War" })
+  local menuDefs = {
+    { "ESP", "□", "Players, teams and highlights" },
+    { "Aim", "◎", "Aimbot, fire and Kill All" },
+    { "Teleport", "▷", "Markers, capture points, players, vehicles" },
+    { "World", "◈", "Visuals, movement and radar" },
+    { "Safety", "⚑", "Legit Mode, session stats and mouse" },
+    { "About", "i", "Status and unload" },
+  }
+  for index, def in ipairs(menuDefs) do
+    pages[def[1]] = nav:Page({ Id = "cw_" .. def[1]:lower(), Name = def[1],
+      Icon = def[2], Tooltip = def[3], Order = index })
+  end
+  pages.ESP:Select()
+  local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" } })
+  local aimTabs = pages.Aim:SubTabs({ { Name = "Aim" }, { Name = "Fire" }, { Name = "Kill All" } })
+  local tpTabs = pages.Teleport:SubTabs({ { Name = "Points" }, { Name = "Players" }, { Name = "Vehicles" } })
+  local worldTabs = pages.World:SubTabs({ { Name = "Visuals" }, { Name = "Move" }, { Name = "Radar" } })
+
   -- AIM --
-  local aimSec = Tab:Section({ Name = "Aim" })
-  aimSec:Paragraph("Camera aimbot. Default aim gate is CapsLock (toggle) — set it in Binds.")
+  local aimSec = aimTabs.Aim:Section({ Name = "Aim" })
+  aimSec:Paragraph("Camera aimbot. The Aim lock key bar is right below in this section.")
   aimSec:Toggle({ Name = "Aimbot", Default = M.flags.aim_enabled == true, Flag = "cw_aim_enabled",
     Callback = function(v) M.flags.aim_enabled = v == true end })
   flagDropdown(aimSec, "Aim part", "aim_part", { "head", "neck", "body" })
@@ -1184,9 +1210,10 @@ return function(api)
   flagToggle(aimSec, "Aim neutrals", "aim_all")
   flagToggle(aimSec, "FOV circle", "aim_fov_circle")
   flagToggle(aimSec, "Pause while hub open", "aim_pause_menu")
+  bindRow(aimSec, "aim")
 
   -- FIRE --
-  local fireSec = Tab:Section({ Name = "Fire" })
+  local fireSec = aimTabs.Fire:Section({ Name = "Fire" })
   fireSec:Paragraph("Rage (X) locks everything on screen and fires. Needs an equipped firearm.")
   rageToggle = fireSec:Toggle({ Name = "Rage aim (X)", Default = M.flags.aim_rage == true, Flag = "cw_aim_rage",
     Callback = function(v)
@@ -1202,9 +1229,10 @@ return function(api)
     Callback = function(v) M.flags.aim_fastzoom = v == true end })
   flagSlider(fireSec, "Fire rate", "aim_fire_rate", 5, 30, { suf = "/s" })
   flagSlider(fireSec, "Zoom FOV", "aim_zoom_fov", 5, 50)
+  bindRow(fireSec, "zoom")
 
   -- ESP --
-  local espSec = Tab:Section({ Name = "ESP" })
+  local espSec = espTabs.Players:Section({ Name = "ESP" })
   espSec:Paragraph("NATO/PACT teams auto-detected (blue = friendly, red = enemy).")
   flagToggle(espSec, "Box", "esp_box")
   flagToggle(espSec, "Health bar", "esp_health")
@@ -1217,20 +1245,20 @@ return function(api)
   flagSlider(espSec, "Range", "esp_range", 200, 6000, { suf = " st" })
 
   -- GLOW --
-  local glowSec = Tab:Section({ Name = "Glow" })
+  local glowSec = espTabs.Glow:Section({ Name = "Glow" })
   glowSec:Paragraph("See-through chams (Highlight).")
   flagToggle(glowSec, "ESP chams (glow)", "glow_on")
   flagToggle(glowSec, "Highlight allies", "glow_friends")
 
   -- RADAR --
-  local radarSec = Tab:Section({ Name = "Radar" })
+  local radarSec = worldTabs.Radar:Section({ Name = "Radar" })
   flagToggle(radarSec, "Radar", "radar_on")
   flagToggle(radarSec, "Show neutral", "radar_neutral")
   flagSlider(radarSec, "Range", "radar_range", 50, 2500, { suf = " st" })
   flagSlider(radarSec, "Size", "radar_size", 100, 420, { suf = "px" })
 
   -- MOVE --
-  local moveSec = Tab:Section({ Name = "Move" })
+  local moveSec = worldTabs.Move:Section({ Name = "Move" })
   noclipToggle = moveSec:Toggle({ Name = "Noclip (N)", Desc = "Walls, no fall",
     Default = M.flags.misc_noclip == true, Flag = "cw_misc_noclip",
     Callback = function(v)
@@ -1246,9 +1274,11 @@ return function(api)
       if v and M.flags.misc_noclip then M.flags.misc_noclip = false; if noclipToggle then noclipToggle.Set(false) end end
     end })
   flagSlider(moveSec, "Fly speed", "fly_speed", 10, 200, { suf = " st/s" })
+  bindRow(moveSec, "noclip")
+  bindRow(moveSec, "fly")
 
   -- WORLD --
-  local worldSec = Tab:Section({ Name = "World" })
+  local worldSec = worldTabs.Visuals:Section({ Name = "World" })
   flagToggle(worldSec, "Fullbright", "visual_fullbright")
   flagSlider(worldSec, "Brightness", "visual_brightness", 0, 2, { dec = 1 })
   flagToggle(worldSec, "Disable weather (rain/snow)", "misc_noweather")
@@ -1262,9 +1292,9 @@ return function(api)
   flagToggle(worldSec, "Crosshair outline", "cross_outline")
   flagToggle(worldSec, "Watermark", "misc_watermark")
 
-  -- TELEPORT --
-  local tpSec = Tab:Section({ Name = "Teleport" })
-  tpSec:Paragraph("P = save position · O = go back · F2/F3 = capture points 1/2.")
+  -- TELEPORT: Points --
+  local tpPoints = tpTabs.Points:Section({ Name = "Markers & points" })
+  tpPoints:Paragraph("P = save position · O = go back · F2/F3 = capture points 1/2.")
   local markerDD, objDD, allyDD, enemyDD
   local refreshTpPlayers -- fwd: defined after enemyDD, used by Refresh button
   local function markerNames()
@@ -1276,7 +1306,7 @@ return function(api)
   local function findMarker(name)
     for _, mk in ipairs(M.markers) do if mk.name == name then return mk end end
   end
-  tpSec:Button({ Name = "Save current position (P)", Callback = function()
+  tpPoints:Button({ Name = "Save current position (P)", Callback = function()
     local me = getChar()
     local hrp = me and me:FindFirstChild("HumanoidRootPart")
     if hrp then
@@ -1285,9 +1315,9 @@ return function(api)
       notify("Position saved")
     end
   end })
-  markerDD = tpSec:Dropdown({ Name = "Marker", Options = markerNames(), Default = "—",
+  markerDD = tpPoints:Dropdown({ Name = "Marker", Options = markerNames(), Default = "—",
     Callback = function() end })
-  tpSec:Button({ Name = "Teleport to marker (O)", Variant = "ghost", Callback = function()
+  tpPoints:Button({ Name = "Teleport to marker (O)", Variant = "ghost", Callback = function()
     local mk = findMarker(tostring(markerDD.Get()))
     if mk then teleport(mk.pos) else notify("No marker") end
   end })
@@ -1300,14 +1330,14 @@ return function(api)
   local function findObj(label)
     for _, o in ipairs(objectives()) do if o.label == label then return o end end
   end
-  tpSec:Button({ Name = "Refresh lists", Variant = "ghost", Callback = function()
+  tpPoints:Button({ Name = "Refresh lists", Variant = "ghost", Callback = function()
     markerDD.SetOptions(markerNames(), true)
     objDD.SetOptions(objNames(), true)
     refreshTpPlayers()
   end })
-  objDD = tpSec:Dropdown({ Name = "Capture point", Options = objNames(), Default = "—",
+  objDD = tpPoints:Dropdown({ Name = "Capture point", Options = objNames(), Default = "—",
     Callback = function() end })
-  tpSec:Button({ Name = "Teleport to point", Variant = "ghost", Callback = function()
+  tpPoints:Button({ Name = "Teleport to point", Variant = "ghost", Callback = function()
     local o = findObj(tostring(objDD.Get()))
     if o then teleport(o.pos) else notify("No point") end
   end })
@@ -1342,13 +1372,15 @@ return function(api)
   local function findPlayer(list, name)
     for _, p in ipairs(list) do if p.Name == name then return p end end
   end
-  allyDD = tpSec:Dropdown({ Name = "Ally", Options = { "—" }, Default = "—", Callback = function() end })
-  tpSec:Button({ Name = "TP to ally", Variant = "ghost", Callback = function()
+  -- TELEPORT: Players --
+  local tpPlayers = tpTabs.Players:Section({ Name = "Players" })
+  allyDD = tpPlayers:Dropdown({ Name = "Ally", Options = { "—" }, Default = "—", Callback = function() end })
+  tpPlayers:Button({ Name = "TP to ally", Variant = "ghost", Callback = function()
     local a = playerLists()
     tpToPlayer(findPlayer(a, tostring(allyDD.Get())))
   end })
-  enemyDD = tpSec:Dropdown({ Name = "Enemy", Options = { "—" }, Default = "—", Callback = function() end })
-  tpSec:Button({ Name = "TP to enemy", Variant = "ghost", Callback = function()
+  enemyDD = tpPlayers:Dropdown({ Name = "Enemy", Options = { "—" }, Default = "—", Callback = function() end })
+  tpPlayers:Button({ Name = "TP to enemy", Variant = "ghost", Callback = function()
     local _, e = playerLists()
     tpToPlayer(findPlayer(e, tostring(enemyDD.Get())))
   end })
@@ -1357,14 +1389,16 @@ return function(api)
     allyDD.SetOptions(nameList(a), true)
     enemyDD.SetOptions(nameList(e), true)
   end
-  tpSec:Button({ Name = "Random ally → tp", Variant = "ghost", Callback = function()
+  tpPlayers:Button({ Name = "Random ally → tp", Variant = "ghost", Callback = function()
     local a = playerLists()
     if #a > 0 then tpToPlayer(a[math.random(1, #a)]) end
   end })
-  tpSec:Button({ Name = "Random enemy → tp", Variant = "ghost", Callback = function()
+  tpPlayers:Button({ Name = "Random enemy → tp", Variant = "ghost", Callback = function()
     local _, e = playerLists()
     if #e > 0 then tpToPlayer(e[math.random(1, #e)]) end
   end })
+  -- TELEPORT: Vehicles --
+  local tpVehicles = tpTabs.Vehicles:Section({ Name = "Vehicles" })
   local function sitOn(seat)
     local ch = getChar()
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -1408,17 +1442,17 @@ return function(api)
     end)
     return out
   end
-  tpSec:Button({ Name = "Free car (sit)", Variant = "ghost", Callback = function()
+  tpVehicles:Button({ Name = "Free car (sit)", Variant = "ghost", Callback = function()
     local v = scanVehicles(false)
     if #v > 0 then sitOn(v[math.random(1, #v)]) else notify("No free vehicle") end
   end })
-  tpSec:Button({ Name = "Driver seat", Variant = "ghost", Callback = function()
+  tpVehicles:Button({ Name = "Driver seat", Variant = "ghost", Callback = function()
     local v = scanVehicles(true)
     if #v > 0 then sitOn(v[math.random(1, #v)]) else notify("No free vehicle") end
   end })
 
   -- KILL ALL --
-  local killSec = Tab:Section({ Name = "Kill All" })
+  local killSec = aimTabs["Kill All"]:Section({ Name = "Kill All" })
   killSec:Paragraph("Teleports behind checked targets and fires. G = start/stop.")
   local killStatus = killSec:Label("idle")
   killToggle = killSec:Toggle({ Name = "Kill All (G)", Default = false,
@@ -1464,25 +1498,10 @@ return function(api)
     killDD.SetOptions(enemyNames(), true)
     killStatus.Set("idle")
   end })
-
-  -- BINDS --
-  local bindsSec = Tab:Section({ Name = "Binds" })
-  bindsSec:Paragraph("Click a key bar, press a key (Esc cancels, Backspace clears). Fixed: Alt/Ctrl mouse · P/O/F2/F3 tp · X rage · G kill · B autofire · N/M noclip/fly.")
-  bindRow(bindsSec, "aim")
-  bindRow(bindsSec, "killall")
-  bindRow(bindsSec, "noclip")
-  bindRow(bindsSec, "fly")
-  bindRow(bindsSec, "zoom")
-  bindsSec:Toggle({ Name = "Free mouse (Alt)", Desc = "Release cursor for the hub window",
-    Default = false, Callback = function(v)
-      M.uiState.mouseFree = v == true
-      pcall(function()
-        userInput.MouseBehavior = v and Enum.MouseBehavior.Default or Enum.MouseBehavior.LockCenter
-      end)
-    end })
+  bindRow(killSec, "killall")
 
   -- SAFETY (anti-ban) --
-  local safeSec = Tab:Section({ Name = "Safety" })
+  local safeSec = pages.Safety:Section({ Name = "Safety" })
   safeSec:Paragraph("No script is undetectable here: the server sees positions, shots and stats, players report (ReportGui), mods watch live. Biggest risks: mass kills, rage snaps, teleports, impossible fire packets. Legit Mode kills all blatant vectors in one tap — it is safer, not immortal.")
   safeSec:Toggle({ Name = "Legit Mode", Desc = "One tap clean",
     Default = false, Flag = "cw_legit",
@@ -1536,8 +1555,19 @@ return function(api)
     end
   end))
 
+  -- MOUSE (keybinds live next to their features now) --
+  local mouseSec = pages.Safety:Section({ Name = "Mouse" })
+  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move · Kill All). Fixed: Alt/Ctrl mouse · P/O/F2/F3 tp · X rage · G kill · B autofire · N/M noclip/fly.")
+  mouseSec:Toggle({ Name = "Free mouse (Alt)", Desc = "Release cursor for the hub window",
+    Default = false, Callback = function(v)
+      M.uiState.mouseFree = v == true
+      pcall(function()
+        userInput.MouseBehavior = v and Enum.MouseBehavior.Default or Enum.MouseBehavior.LockCenter
+      end)
+    end })
+
   -- ABOUT --
-  local aboutSec = Tab:Section({ Name = "About" })
+  local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("COLD WAR · hub module (engine v3)")
   aboutSec:Paragraph("NATO/PACT auto-teams · R6 · BallisticsNet fire · conquest teleports. Persistence via hub Settings → Config.")
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
@@ -1687,6 +1717,7 @@ return function(api)
   unloadModule = function()
     if killAll.active then pcall(stopKillAll) end
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
+    for _, page in pairs(pages) do pcall(function() page:Destroy() end) end
     for _, s in ipairs(frameShapes) do pcall(function() s:Remove() end) end
     for _, s in ipairs(prevShapes) do pcall(function() s:Remove() end) end
     frameShapes, prevShapes = {}, {}
