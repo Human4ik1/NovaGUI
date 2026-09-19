@@ -4,13 +4,18 @@
   Universe redirect: client/universes/4750561026.lua (every map funnels here).
 
   Converted from ColdWar.lua (standalone, own menu) to hub format:
-    - the full engine is kept 1:1 (teams, ESP, glow, aimbot, fire packets,
-      kill-all, radar, crosshair, movement, teleports, vehicles, binds);
+    - the full engine is kept (teams, ESP, glow, aimbot, fire packets,
+      radar, crosshair, movement, binds);
+    - REMOVED for the game anti-teleport system (hub-3): every CFrame
+      position write — teleport(), Kill All, vehicle seats. Replaced with
+      safe read-only intel: waypoint/objective ESP (Marks) + camera
+      Spectate. Nothing here moves your character anymore except
+      noclip/fly (gradual movement, no position snaps);
     - the custom menu is replaced by Nova controls in Delta layout:
-      Navigation → Pages (ESP/Aim/Teleport/World/Safety/About) → SubTabs;
-    - keybind bars live inside their feature sections (Aim/Fire/Move/Kill);
+      Navigation → Pages (ESP/Aim/World/Safety/About) → SubTabs;
+    - keybind bars live inside their feature sections (Aim/Fire/Move);
     - persistence now rides Nova:Save/Load (Flag = engine key), the JSON
-      file is gone; kill-list/markers stay session-only.
+      file is gone; waypoints stay session-only.
 
   Notes for this place:
     - Teams: Neutral / NATO / PACT (Player.Team + attributes).
@@ -40,11 +45,11 @@ return function(api)
   end
 
   local M = {}
-  M.version = "hub-2"
+  M.version = "hub-3"
   M.flags = {}
   M.errors = {}
-  M.markers = {}
-  M.killAllChecked = M.killAllChecked or {}
+  M.marks = {} -- session waypoints (visual only, never teleported to)
+  M.specPlr = nil -- spectated player (camera only)
   M.uiState = { open = false, mouseFree = false }
   M.binds = { prev = {}, last = {}, tog = {}, hold = {} }
 
@@ -376,10 +381,10 @@ return function(api)
   -- --------------------------------------------------------------------------
   local aimState = { active = false, current = nil }
 
-  -- --------------------------------------------------------------------------
-  -- Kill All
-  -- --------------------------------------------------------------------------
-  local killAll = { active = false, origin = nil, targets = {}, index = 1, timer = 0 }
+  -- NOTE: Kill All / teleports / vehicle seats were removed in hub-3
+  -- (game anti-teleport). Rage + autofire cover damage; Marks + Spectate
+  -- cover intel. No function in this module writes HRP.CFrame anymore,
+  -- except gradual fly/noclip movement.
 
   local function getAimPoint(t, part)
     local char = t.character
@@ -448,7 +453,6 @@ return function(api)
   local function updateAim()
     local cfg = M.flags
     local me = getChar()
-    if killAll.active then aimState.active = false return end
     if not cfg.aim_enabled or not me then aimState.active = false return end
     if hubOpen() and cfg.aim_pause_menu and not cfg.aim_rage then aimState.active = false return end
     local hrp = me:FindFirstChild("HumanoidRootPart")
@@ -582,99 +586,8 @@ return function(api)
   -- --------------------------------------------------------------------------
   -- Kill All
   -- --------------------------------------------------------------------------
-  local function startKillAll()
-    if M.flags.legit then notify("Blocked by Legit Mode") return end
-    if killAll.active then return end
-    local me = getChar()
-    if not me then return end
-    local hrp = me:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    killAll.origin = hrp.CFrame
-    killAll.index = 1
-    killAll.timer = 0
-    killAll.active = true
-  end
-
-  local function stopKillAll()
-    killAll.active = false
-    if killAll.origin then
-      local ch = getChar()
-      if ch then
-        local hrp = ch:FindFirstChild("HumanoidRootPart")
-        if hrp then
-          pcall(function()
-            hrp.CFrame = killAll.origin
-            pcall(function() hrp.Velocity = Vector3.new(0, 0, 0) end)
-            pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
-          end)
-        end
-      end
-    end
-    killAll.origin = nil
-    killAll.targets = {}
-    killAll.index = 1
-  end
-
-  local function stepKillAll(dt)
-    if not killAll.active then return end
-    killAll.timer = killAll.timer + dt
-    local cfg = M.flags
-    local delay = cfg.killall_delay or 0.08
-
-    if #killAll.targets == 0 then
-      local checked = M.killAllChecked or {}
-      local list = {}
-      for plName, v in pairs(checked) do
-        if v then
-          local pl = players:FindFirstChild(plName)
-          if pl then
-            local ch = pl.Character
-            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-            if hrp and hum and hum.Health > 0 then
-              list[#list + 1] = { player = pl, character = ch, hrp = hrp, humanoid = hum }
-            end
-          end
-        end
-      end
-      killAll.targets = list
-      killAll.index = 1
-      if #list == 0 then
-        stopKillAll()
-        return
-      end
-    end
-
-    local t = killAll.targets[killAll.index]
-    if not t then
-      stopKillAll()
-      return
-    end
-
-    local ch = getChar()
-    if not ch then return end
-    local hrp = ch:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local hum = t.character and t.character:FindFirstChildOfClass("Humanoid")
-    local tHrp = t.character and t.character:FindFirstChild("HumanoidRootPart")
-    if not hum or not tHrp or hum.Health <= 0 then
-      killAll.index = killAll.index + 1
-      killAll.timer = 0
-      return
-    end
-
-    local behindPos = tHrp.Position - tHrp.CFrame.LookVector * 3
-    behindPos = Vector3.new(behindPos.X, tHrp.Position.Y + 1, behindPos.Z)
-    local headPos = (t.character:FindFirstChild("Head") or tHrp).Position
-    pcall(function()
-      hrp.CFrame = CFrame.lookAt(behindPos, headPos)
-    end)
-
-    if killAll.timer > (cfg.killall_delay or 0.15) then
-      fireWeapon()
-    end
-  end
+  -- startKillAll/stopKillAll/stepKillAll: deleted in hub-3 (teleport-based,
+  -- trips the game anti-teleport). See Marks + Spectate for safe intel.
 
   -- --------------------------------------------------------------------------
   -- Radar
@@ -942,7 +855,8 @@ return function(api)
   end
 
   -- --------------------------------------------------------------------------
-  -- Teleport / markers
+  -- Intel (read-only): capture points + session waypoints, drawn on screen.
+  -- Replacement for the removed teleport markers — nothing here moves you.
   -- --------------------------------------------------------------------------
   local function objectives()
     local out = {}
@@ -970,43 +884,32 @@ return function(api)
     return out
   end
 
-  local tpParams
-  local function groundY(pos)
-    if not tpParams then
-      local ok, P = pcall(function() return RaycastParams.new() end)
-      if ok and P then tpParams = P end
+  local function drawMarks()
+    local cfg = M.flags
+    if not cfg.marks_on then return end
+    local me = getChar()
+    local hrp = me and me:FindFirstChild("HumanoidRootPart")
+    local items = {}
+    for _, mk in ipairs(M.marks) do items[#items + 1] = mk end
+    if cfg.marks_objectives then
+      for _, o in ipairs(objectives()) do
+        items[#items + 1] = { name = "◉ " .. o.label, pos = o.pos }
+      end
     end
-    if tpParams then
-      tpParams.FilterType = Enum.RaycastFilterType.Exclude
-      tpParams.FilterDescendantsInstances = { getChar() or workspace.CurrentCamera }
-      local ok, hit = pcall(function()
-        return workspace:Raycast(pos + Vector3.new(0, 30, 0), Vector3.new(0, -600, 0), tpParams)
-      end)
-      if ok and hit then return hit.Position end
+    local range = cfg.marks_range or 4000
+    for _, mk in ipairs(items) do
+      local d = hrp and (hrp.Position - mk.pos).Magnitude or 0
+      if d <= range then
+        local sp, on = wts(mk.pos)
+        if on then
+          local txt = shape("Text")
+          txt.Color = { R = 0.45, G = 0.85, B = 1 }; txt.Size = 13
+          txt.Center = true; txt.Outline = true; txt.Transparency = 1
+          txt.Text = mk.name .. "  " .. string.format("%.0fm", d)
+          txt.Position = sp
+        end
+      end
     end
-    return nil
-  end
-
-  local function teleport(pos)
-    local ch = getChar()
-    if not ch then return "no char" end
-    local hrp = ch:FindFirstChild("HumanoidRootPart")
-    if not hrp then return "no hrp" end
-    if M.flags.legit and (hrp.Position - pos).Magnitude > 300 then
-      notify("Legit: teleport too far (>300st)")
-      return "blocked"
-    end
-    local target = pos
-    local gy = groundY(pos)
-    if gy then
-      target = Vector3.new(pos.X, gy.Y + 3, pos.Z)
-    end
-    pcall(function()
-      hrp.CFrame = CFrame.new(target)
-      pcall(function() hrp.Velocity = Vector3.new(0, 0, 0) end)
-      pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
-    end)
-    return "tp ok"
   end
 
   -- --------------------------------------------------------------------------
@@ -1023,7 +926,7 @@ return function(api)
       end
       do local ok, e = pcall(updateAim) if not ok then recordError("aim", e) end end
       do local ok, e = pcall(function()
-        aimFOV(aimState.active or killAll.active
+        aimFOV(aimState.active
           or (M.flags.aim_fastzoom and M.flags.aim_enabled
             and userInput:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)))
       end) if not ok then recordError("fov", e) end end
@@ -1032,7 +935,7 @@ return function(api)
       do local ok, e = pcall(drawRadar) if not ok then recordError("radar", e) end end
       do local ok, e = pcall(updateVisuals) if not ok then recordError("visuals", e) end end
       do local ok, e = pcall(updateMovement, dt) if not ok then recordError("move", e) end end
-      do local ok, e = pcall(stepKillAll, dt) if not ok then recordError("killall", e) end end
+      do local ok, e = pcall(drawMarks) if not ok then recordError("marks", e) end end
       do local ok, e = pcall(syncCrosshair) if not ok then recordError("cross", e) end end
       if M.uiState.mouseFree then
         do local ok, e = pcall(function()
@@ -1052,7 +955,7 @@ return function(api)
     aim_friends = false, aim_all = false, aim_fov_circle = false, aim_pause_menu = false,
     aim_autofire = false, aim_rage = false, aim_fastzoom = false, aim_zoom_fov = 25,
     aim_fire_rate = 15, aim_head_off = 0.3, aim_delay = 0.08,
-    killall_delay = 0.15,
+    marks_on = false, marks_objectives = false, marks_range = 4000,
     esp_box = false, esp_health = false, esp_tracer = false, esp_name = false,
     esp_distance = false, esp_weapon = false, esp_team = false, esp_thickness = 1,
     esp_range = 4000,
@@ -1064,7 +967,6 @@ return function(api)
     cross_style = "cross", cross_thickness = 1, cross_gap = 4, cross_length = 7,
     cross_color = "white", cross_outline = true,
     bind_aim_key = "CapsLock", bind_aim_mode = "toggle",
-    bind_killall_key = "none", bind_killall_mode = "toggle",
     bind_noclip_key = "none", bind_noclip_mode = "toggle",
     bind_fly_key = "none", bind_fly_mode = "toggle",
     bind_zoom_key = "none", bind_zoom_mode = "toggle",
@@ -1075,22 +977,13 @@ return function(api)
   end
 
   -- Nova control handles + unload fn (forward: bind sides/hotkeys sync them)
-  local killToggle, noclipToggle, flyToggle, zoomToggle
+  local noclipToggle, flyToggle, zoomToggle
   local rageToggle, autoToggle
   local unloadModule
   local legitGuard -- fwd: returns true (and notifies) when Legit blocks
 
   M.bindDefs = {
     aim = { label = "Aim lock", keyflag = "bind_aim_key", modflag = "bind_aim_mode" },
-    killall = {
-      label = "Kill all", keyflag = "bind_killall_key", modflag = "bind_killall_mode",
-      side = function(on)
-        if killAll.active == on then return end
-        if on then startKillAll() else stopKillAll() end
-        notify("Kill All " .. (on and "STARTED" or "STOPPED"))
-        if killToggle then killToggle.Set(killAll.active) end
-      end,
-    },
     noclip = {
       label = "Noclip", keyflag = "bind_noclip_key", modflag = "bind_noclip_mode",
       side = function(on)
@@ -1173,10 +1066,9 @@ return function(api)
   local pages = {}
   local nav = api.Navigation or Tab:Navigation({ Name = "Cold War" })
   local menuDefs = {
-    { "ESP", "□", "Players, teams and highlights" },
-    { "Aim", "◎", "Aimbot, fire and Kill All" },
-    { "Teleport", "▷", "Markers, capture points, players, vehicles" },
-    { "World", "◈", "Visuals, movement and radar" },
+    { "ESP", "□", "Players, teams, highlights and spectate" },
+    { "Aim", "◎", "Aimbot and fire" },
+    { "World", "◈", "Visuals, movement, radar and marks" },
     { "Safety", "⚑", "Legit Mode, session stats and mouse" },
     { "About", "i", "Status and unload" },
   }
@@ -1186,9 +1078,8 @@ return function(api)
   end
   pages.ESP:Select()
   local espTabs = pages.ESP:SubTabs({ { Name = "Players" }, { Name = "Glow" } })
-  local aimTabs = pages.Aim:SubTabs({ { Name = "Aim" }, { Name = "Fire" }, { Name = "Kill All" } })
-  local tpTabs = pages.Teleport:SubTabs({ { Name = "Points" }, { Name = "Players" }, { Name = "Vehicles" } })
-  local worldTabs = pages.World:SubTabs({ { Name = "Visuals" }, { Name = "Move" }, { Name = "Radar" } })
+  local aimTabs = pages.Aim:SubTabs({ { Name = "Aim" }, { Name = "Fire" } })
+  local worldTabs = pages.World:SubTabs({ { Name = "Visuals" }, { Name = "Move" }, { Name = "Radar" }, { Name = "Marks" } })
 
   -- AIM --
   local aimSec = aimTabs.Aim:Section({ Name = "Aim" })
@@ -1292,55 +1183,7 @@ return function(api)
   flagToggle(worldSec, "Crosshair outline", "cross_outline")
   flagToggle(worldSec, "Watermark", "misc_watermark")
 
-  -- TELEPORT: Points --
-  local tpPoints = tpTabs.Points:Section({ Name = "Markers & points" })
-  tpPoints:Paragraph("P = save position · O = go back · F2/F3 = capture points 1/2.")
-  local markerDD, objDD, allyDD, enemyDD
-  local refreshTpPlayers -- fwd: defined after enemyDD, used by Refresh button
-  local function markerNames()
-    local out = {}
-    for _, mk in ipairs(M.markers) do table.insert(out, mk.name) end
-    if #out == 0 then out = { "—" } end
-    return out
-  end
-  local function findMarker(name)
-    for _, mk in ipairs(M.markers) do if mk.name == name then return mk end end
-  end
-  tpPoints:Button({ Name = "Save current position (P)", Callback = function()
-    local me = getChar()
-    local hrp = me and me:FindFirstChild("HumanoidRootPart")
-    if hrp then
-      table.insert(M.markers, { name = "Marked " .. (#M.markers + 1), pos = hrp.Position })
-      markerDD.SetOptions(markerNames(), true)
-      notify("Position saved")
-    end
-  end })
-  markerDD = tpPoints:Dropdown({ Name = "Marker", Options = markerNames(), Default = "—",
-    Callback = function() end })
-  tpPoints:Button({ Name = "Teleport to marker (O)", Variant = "ghost", Callback = function()
-    local mk = findMarker(tostring(markerDD.Get()))
-    if mk then teleport(mk.pos) else notify("No marker") end
-  end })
-  local function objNames()
-    local out = {}
-    for _, o in ipairs(objectives()) do table.insert(out, o.label) end
-    if #out == 0 then out = { "—" } end
-    return out
-  end
-  local function findObj(label)
-    for _, o in ipairs(objectives()) do if o.label == label then return o end end
-  end
-  tpPoints:Button({ Name = "Refresh lists", Variant = "ghost", Callback = function()
-    markerDD.SetOptions(markerNames(), true)
-    objDD.SetOptions(objNames(), true)
-    refreshTpPlayers()
-  end })
-  objDD = tpPoints:Dropdown({ Name = "Capture point", Options = objNames(), Default = "—",
-    Callback = function() end })
-  tpPoints:Button({ Name = "Teleport to point", Variant = "ghost", Callback = function()
-    local o = findObj(tostring(objDD.Get()))
-    if o then teleport(o.pos) else notify("No point") end
-  end })
+  -- SPECTATE (safe replacement for TP-to-player: camera only, no position writes)
   local function alivePl(p)
     local ch = p.Character
     local h = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -1358,154 +1201,87 @@ return function(api)
     end
     return allies, enemies
   end
-  local function tpToPlayer(p)
-    if not p then notify("No target") return end
-    local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-    if hrp then teleport(hrp.Position + Vector3.new(0, 0.5, 0)) end
-  end
-  local function nameList(list)
-    local out = {}
-    for _, p in ipairs(list) do table.insert(out, p.Name) end
-    if #out == 0 then out = { "—" } end
-    return out
-  end
   local function findPlayer(list, name)
     for _, p in ipairs(list) do if p.Name == name then return p end end
   end
-  -- TELEPORT: Players --
-  local tpPlayers = tpTabs.Players:Section({ Name = "Players" })
-  allyDD = tpPlayers:Dropdown({ Name = "Ally", Options = { "—" }, Default = "—", Callback = function() end })
-  tpPlayers:Button({ Name = "TP to ally", Variant = "ghost", Callback = function()
-    local a = playerLists()
-    tpToPlayer(findPlayer(a, tostring(allyDD.Get())))
-  end })
-  enemyDD = tpPlayers:Dropdown({ Name = "Enemy", Options = { "—" }, Default = "—", Callback = function() end })
-  tpPlayers:Button({ Name = "TP to enemy", Variant = "ghost", Callback = function()
-    local _, e = playerLists()
-    tpToPlayer(findPlayer(e, tostring(enemyDD.Get())))
-  end })
-  refreshTpPlayers = function()
-    local a, e = playerLists()
-    allyDD.SetOptions(nameList(a), true)
-    enemyDD.SetOptions(nameList(e), true)
-  end
-  tpPlayers:Button({ Name = "Random ally → tp", Variant = "ghost", Callback = function()
-    local a = playerLists()
-    if #a > 0 then tpToPlayer(a[math.random(1, #a)]) end
-  end })
-  tpPlayers:Button({ Name = "Random enemy → tp", Variant = "ghost", Callback = function()
-    local _, e = playerLists()
-    if #e > 0 then tpToPlayer(e[math.random(1, #e)]) end
-  end })
-  -- TELEPORT: Vehicles --
-  local tpVehicles = tpTabs.Vehicles:Section({ Name = "Vehicles" })
-  local function sitOn(seat)
-    local ch = getChar()
-    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-    if not (hum and hrp and seat) then return end
-    pcall(function() hrp.CFrame = seat.CFrame * CFrame.new(0, 3, 0) end)
-    task.wait(0.05)
-    pcall(function() hrp.CFrame = seat.CFrame * CFrame.new(0, 1.6, 0) end)
-    pcall(function() hum.Sit = true end)
-  end
-  local function scanVehicles(wantDriver)
-    local out = {}
-    local seen = {}
+  local specSec = espTabs.Players:Section({ Name = "Spectate" })
+  specSec:Paragraph("Camera follows the picked player. Your character never moves — anti-teleport safe. Aimbot still drives the camera while on.")
+  local specDD
+  local function specStop(silent)
+    M.specPlr = nil
+    local me = getChar()
+    local hum = me and me:FindFirstChildOfClass("Humanoid")
     pcall(function()
-      for _, s in ipairs(workspace:GetDescendants()) do
-        if s:IsA("VehicleSeat") then
-          local m = s:FindFirstAncestorOfClass("Model")
-          if m and not seen[m] then
-            seen[m] = true
-            local free = {}
-            for _, ss in ipairs(m:GetDescendants()) do
-              if ss:IsA("VehicleSeat") then
-                local okO, ov = pcall(function() return ss.Occupant end)
-                if okO and not ov then free[#free + 1] = ss end
-              end
-            end
-            if #free > 0 then
-              if wantDriver then
-                local d2 = nil
-                for _, f in ipairs(free) do
-                  if tostring(f.Name):lower():find("driver") then d2 = f break end
-                end
-                out[#out + 1] = d2 or free[1]
-              else
-                out[#out + 1] = free[1]
-              end
-            end
-          end
-        end
-      end
+      if hum then camera.CameraSubject = hum end
     end)
-    return out
+    if not silent then notify("Spectate off") end
   end
-  tpVehicles:Button({ Name = "Free car (sit)", Variant = "ghost", Callback = function()
-    local v = scanVehicles(false)
-    if #v > 0 then sitOn(v[math.random(1, #v)]) else notify("No free vehicle") end
-  end })
-  tpVehicles:Button({ Name = "Driver seat", Variant = "ghost", Callback = function()
-    local v = scanVehicles(true)
-    if #v > 0 then sitOn(v[math.random(1, #v)]) else notify("No free vehicle") end
-  end })
-
-  -- KILL ALL --
-  local killSec = aimTabs["Kill All"]:Section({ Name = "Kill All" })
-  killSec:Paragraph("Teleports behind checked targets and fires. G = start/stop.")
-  local killStatus = killSec:Label("idle")
-  killToggle = killSec:Toggle({ Name = "Kill All (G)", Default = false,
-    Callback = function(v)
-      if v then startKillAll() else stopKillAll() end
-      if killToggle then killToggle.Set(killAll.active, true) end -- silent: no loop
-      killStatus.Set(killAll.active and "RUNNING" or "idle")
-    end })
-  killSec:Slider({ Name = "Step delay", Min = 0.01, Max = 0.5, Default = M.flags.killall_delay or 0.15,
-    Decimals = 2, Suffix = "s", Flag = "cw_killall_delay",
-    Callback = function(v) M.flags.killall_delay = tonumber(v) or 0.15 end })
-  local killDD
-  local function enemyNames()
-    local _, e = playerLists()
-    return nameList(e)
+  local function specStart()
+    local a, e = playerLists()
+    local all = {}
+    for _, p in ipairs(a) do all[#all + 1] = p end
+    for _, p in ipairs(e) do all[#all + 1] = p end
+    local want = tostring(specDD.Get()):gsub("^%[ally%] ", "")
+    local tgt = findPlayer(all, want)
+    if not tgt then notify("No target") return end
+    local ch = tgt.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not hum then notify("Target not spawned") return end
+    M.specPlr = tgt
+    pcall(function() camera.CameraSubject = hum end)
+    notify("Spectating " .. tgt.Name)
   end
-  killDD = killSec:MultiDropdown({ Name = "Targets (enemies)", Options = enemyNames(), Default = {},
-    Tooltip = "Checked players are visited by Kill All",
-    Callback = function(v)
-      M.killAllChecked = {}
-      if type(v) == "table" then
-        for _, n in ipairs(v) do M.killAllChecked[tostring(n)] = true end
-      end
-      local n = 0
-      for _ in pairs(M.killAllChecked) do n = n + 1 end
-      killStatus.Set((killAll.active and "RUNNING · " or "") .. n .. " targets")
-    end })
-  killSec:Button({ Name = "Check all enemies", Variant = "ghost", Callback = function()
-    for _, pl in ipairs(players:GetPlayers()) do
-      if pl ~= getLocal() then
-        local ch = pl.Character
-        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 and hostility(pl) == "enemy" then
-          M.killAllChecked[pl.Name] = true
-        end
-      end
+  local function specRefresh()
+    local a, e = playerLists()
+    local out = {}
+    for _, p in ipairs(a) do out[#out + 1] = "[ally] " .. p.Name end
+    for _, p in ipairs(e) do out[#out + 1] = p.Name end
+    if #out == 0 then out = { "—" } end
+    specDD.SetOptions(out, true)
+  end
+  specDD = specSec:Dropdown({ Name = "Player", Options = { "—" }, Default = "—",
+    Callback = function() end })
+  specSec:Button({ Name = "Spectate", Variant = "ghost", Callback = function()
+    specStart()
+  end })
+  specSec:Button({ Name = "Stop (back to me)", Variant = "ghost", Callback = function()
+    specStop()
+  end })
+  specSec:Button({ Name = "Refresh list", Variant = "ghost", Callback = function()
+    specRefresh()
+  end })
+  -- (TP-to-player removed in hub-3: use Spectate above. Vehicles removed: no
+  -- safe equivalent — sitting required a CFrame snap into the seat.)
+  -- MARKS (safe replacement for teleport markers: pure ESP, no position writes)
+  local marksSec = worldTabs.Marks:Section({ Name = "Marks" })
+  marksSec:Paragraph("On-screen waypoints + capture points. Nothing moves you — anti-teleport safe.")
+  local marksCount
+  flagToggle(marksSec, "Waypoint ESP", "marks_on")
+  flagToggle(marksSec, "Capture points", "marks_objectives")
+  flagSlider(marksSec, "Range", "marks_range", 200, 6000, { suf = " st" })
+  marksSec:Button({ Name = "Save position (P)", Callback = function()
+    local me = getChar()
+    local hrp = me and me:FindFirstChild("HumanoidRootPart")
+    if hrp then
+      table.insert(M.marks, { name = "Mark " .. (#M.marks + 1), pos = hrp.Position })
+      marksCount.Set(#M.marks .. " saved")
+      notify("Mark saved")
     end
-    killDD.SetOptions(enemyNames(), true)
-    killStatus.Set("targets checked")
   end })
-  killSec:Button({ Name = "Clear + refresh", Variant = "ghost", Callback = function()
-    M.killAllChecked = {}
-    killDD.SetOptions(enemyNames(), true)
-    killStatus.Set("idle")
+  marksSec:Button({ Name = "Clear marks", Variant = "ghost", Callback = function()
+    M.marks = {}
+    marksCount.Set("0 saved")
   end })
-  bindRow(killSec, "killall")
+  marksCount = marksSec:Label("0 saved")
+
+  -- (Kill All UI removed in hub-3: teleport-based. Rage + autofire in Aim/Fire cover damage.)
 
   -- SAFETY (anti-ban) --
   local safeSec = pages.Safety:Section({ Name = "Safety" })
-  safeSec:Paragraph("No script is undetectable here: the server sees positions, shots and stats, players report (ReportGui), mods watch live. Biggest risks: mass kills, rage snaps, teleports, impossible fire packets. Legit Mode kills all blatant vectors in one tap — it is safer, not immortal.")
+  safeSec:Paragraph("No script is undetectable here: the server sees positions, shots and stats, players report (ReportGui), mods watch live. Biggest risks: rage snaps, impossible fire packets, blatant fly/noclip. Teleport vectors were removed from this module (anti-teleport). Legit Mode kills the remaining blatant vectors in one tap — it is safer, not immortal.")
   safeSec:Toggle({ Name = "Legit Mode", Desc = "One tap clean",
     Default = false, Flag = "cw_legit",
-    Tooltip = "Forces off rage/autofire/fly/noclip/kill-all, forces visible-check + enemies-only + fire-rate cap + 300st teleport cap. Blocks re-enabling while on.",
+    Tooltip = "Forces off rage/autofire/fly/noclip, forces visible-check + enemies-only + fire-rate cap. Blocks re-enabling while on.",
     Callback = function(v)
       M.flags.legit = v == true
       if v then
@@ -1513,13 +1289,10 @@ return function(api)
         M.flags.aim_autofire = false
         M.flags.misc_fly = false
         M.flags.misc_noclip = false
-        if killAll.active then stopKillAll() end
         if rageToggle then rageToggle.Set(false) end
         if autoToggle then autoToggle.Set(false) end
         if flyToggle then flyToggle.Set(false) end
         if noclipToggle then noclipToggle.Set(false) end
-        if killToggle then killToggle.Set(false, true) end
-        killStatus.Set("idle")
         notify("Legit Mode ON — blatant features off")
       else
         notify("Legit Mode OFF")
@@ -1539,6 +1312,11 @@ return function(api)
     local now = os.clock()
     if now - kdTick < 2 then return end
     kdTick = now
+    if M.specPlr then -- spectate target left or died: drop back to self
+      local sch = M.specPlr.Character
+      local sh = sch and sch:FindFirstChildOfClass("Humanoid")
+      if not sh or sh.Health <= 0 then pcall(function() specStop(true) end) end
+    end
     local k, d = numAttr("Kills"), numAttr("Deaths")
     if not kdBase then kdBase = { k = k, d = d } end
     local sk, sd = k - kdBase.k, d - kdBase.d
@@ -1557,7 +1335,7 @@ return function(api)
 
   -- MOUSE (keybinds live next to their features now) --
   local mouseSec = pages.Safety:Section({ Name = "Mouse" })
-  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move · Kill All). Fixed: Alt/Ctrl mouse · P/O/F2/F3 tp · X rage · G kill · B autofire · N/M noclip/fly.")
+  mouseSec:Paragraph("Key bars sit inside their feature sections (Aim · Fire · Move). Fixed: Alt/Ctrl mouse · P save mark · X rage · B autofire · N/M noclip/fly.")
   mouseSec:Toggle({ Name = "Free mouse (Alt)", Desc = "Release cursor for the hub window",
     Default = false, Callback = function(v)
       M.uiState.mouseFree = v == true
@@ -1569,7 +1347,7 @@ return function(api)
   -- ABOUT --
   local aboutSec = pages.About:Section({ Name = "About" })
   aboutSec:Label("COLD WAR · hub module (engine v3)")
-  aboutSec:Paragraph("NATO/PACT auto-teams · R6 · BallisticsNet fire · conquest teleports. Persistence via hub Settings → Config.")
+  aboutSec:Paragraph("NATO/PACT auto-teams · R6 · BallisticsNet fire · objective intel. No teleports — anti-teleport safe. Persistence via hub Settings → Config.")
   aboutSec:Button({ Name = "Unload module", Variant = "danger", Callback = function()
     unloadModule()
   end })
@@ -1578,8 +1356,8 @@ return function(api)
   -- Hotkeys (no menu toggle / drag / picking — hub owns the window)
   -- --------------------------------------------------------------------------
   local function initKeys()
-    local lastAlt, lastCtrl, lastP, lastO, lastF2, lastF3 = 0, 0, 0, 0, 0, 0
-    local lastG, lastX, lastB = 0, 0, 0
+    local lastAlt, lastCtrl, lastP = 0, 0, 0
+    local lastX, lastB = 0, 0
     local lastN, lastM = 0, 0
 
     regConn(runService.Heartbeat:Connect(function()
@@ -1610,31 +1388,10 @@ return function(api)
           local me, hrp = getChar(), nil
           if me then hrp = me:FindFirstChild("HumanoidRootPart") end
           if hrp then
-            table.insert(M.markers, { name = "Marked " .. (#M.markers + 1), pos = hrp.Position })
-            markerDD.SetOptions(markerNames(), true)
-            notify("Position saved")
+            table.insert(M.marks, { name = "Mark " .. (#M.marks + 1), pos = hrp.Position })
+            if marksCount then marksCount.Set(#M.marks .. " saved") end
+            notify("Mark saved")
           end
-        end
-        if userInput:IsKeyDown(Enum.KeyCode.O) and (t - lastO) > 0.4 then
-          lastO = t
-          local last = M.markers[#M.markers]
-          if last then teleport(last.pos) end
-        end
-        local obs = objectives()
-        if userInput:IsKeyDown(Enum.KeyCode.F2) and (t - lastF2) > 0.4 and obs[1] then
-          lastF2 = t
-          teleport(obs[1].pos)
-        end
-        if userInput:IsKeyDown(Enum.KeyCode.F3) and (t - lastF3) > 0.4 and obs[2] then
-          lastF3 = t
-          teleport(obs[2].pos)
-        end
-        if userInput:IsKeyDown(Enum.KeyCode.G) and (t - lastG) > 0.5 then
-          lastG = t
-          if killAll.active then stopKillAll() else startKillAll() end
-          if killToggle then killToggle.Set(killAll.active) end
-          killStatus.Set(killAll.active and "RUNNING" or "idle")
-          notify(killAll.active and "Kill All STARTED" or "Kill All STOPPED")
         end
         if userInput:IsKeyDown(Enum.KeyCode.X) and (t - lastX) > 0.3 then
           lastX = t
@@ -1715,7 +1472,7 @@ return function(api)
   -- Unload + boot
   -- --------------------------------------------------------------------------
   unloadModule = function()
-    if killAll.active then pcall(stopKillAll) end
+    pcall(function() specStop(true) end)
     for _, c in ipairs(CONNS) do pcall(function() c:Disconnect() end) end
     for _, page in pairs(pages) do pcall(function() page:Destroy() end) end
     for _, s in ipairs(frameShapes) do pcall(function() s:Remove() end) end
@@ -1737,8 +1494,7 @@ return function(api)
   beginRender()
   initKeys()
   flushVisuals()
-  refreshTpPlayers()
-  killDD.SetOptions(enemyNames(), true)
+  specRefresh()
 
   local hub = { Unload = unloadModule }
   if getgenv then pcall(function()
